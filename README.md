@@ -1,106 +1,196 @@
 # armor_track_ros2
 
-小云台跟随手持小装甲板的 ROS2 视觉主链路（Foxy / Ubuntu 20.04）。
+RoboMaster 风格的 **ROS2（Humble / Ubuntu 22.04）视觉自瞄包**：把「相机取流 → 传统视觉识别装甲板 → PnP 测距 → 6 维 EKF 跟踪 → 串口下发云台角度」整条链路串起来，并自带大恒（Galaxy）相机驱动与标定流程。
 
-## 功能链路
+---
+
+## 一、这套代码能完成什么任务
+
+一句话：**让云台自动瞄准并持续跟随敌方装甲板。**
+
+具体能做的几件事：
+
+1. **相机驱动 + 标定**：内置大恒 Galaxy 相机驱动 `daheng_camera_node`，发布 `image_raw` + `camera_info`，配合 ROS 的 `cameracalibrator` 完成内参标定，为 PnP 测距提供内参。
+2. **实时装甲板检测**：纯传统视觉（HSV 颜色分割 → 形态学 → 灯条拟合 → 灯条配对 → 装甲四点），不依赖深度学习也能跑，帧率高、对算力要求低；可选接一个数字识别 CNN 来绑定装甲编号。
+3. **目标 3D 定位与测距**：对装甲四点做 `solvePnP`（IPPE）解出相机系下的 3D 位置，再经相机→云台外参换到云台/世界系，得到距离。
+4. **运动跟踪与预测**：6 维扩展卡尔曼滤波（`[x,vx,y,vy,z,vz]`）估计目标线速度与视线角速度，并做延迟补偿，预测下发时刻的位置。
+5. **云台控制下发**：把解算出的 yaw/pitch/距离/角速度打包成 `GimbalCmd`，再由 `serial_node` 通过串口（`0x55` 帧头 / `0xFF` 帧尾、无 CRC）发给电控执行跟随。
+
+### 完整链路
 
 ```
-camera (image_raw + camera_info)
-   │  cv_bridge -> BGR
-   ▼
-装甲四点检测 detectArmorPoints(bgr)   ← 你的检测器接入点（无序四点）
-   │
-   ▼
-四点排序 [左上, 右上, 右下, 左下]
-   │
-   ├──► 裁剪 ROI（透视图 96x96）+ 数字识别 → 编号绑定 armor.name
-   │
-   ▼
-PnP 解算(solvePnP IPPE) → 相机系 tvec
-   │
-   ▼
-坐标变换：相机系 → 云台系(R_camera2gimbal) → 世界系(R_gimbal2world)
-   │
-   ▼
-6 维 EKF [x,vx,y,vy,z,vz] → 线速度 + 视线角速度(yaw_rate/pitch_rate)
-   │
-   ▼
-延迟补偿 + yaw/pitch 偏移 → 发布 GimbalCmd（无串口，只到 ROS2 话题）
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  大恒相机 daheng_camera_node  (namespace /camera)                            │
+│    发布 /camera/image_raw (bgr8)  +  /camera/camera_info (内参)              │
+└───────────────────────────────┬─────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  armor_track_node                                                            │
+│   传统装甲识别（HSV→灯条→配对→四点+数字）                                     │
+│        → PnP(solvePnP IPPE) 相机系 3D 位置                                   │
+│        → 外参变换 相机系→云台系→世界系                                        │
+│        → 6 维 EKF 跟踪 + 延迟补偿                                            │
+│        → 发布 /gimbal_cmd (GimbalCmd)                                        │
+└───────────────────────────────┬─────────────────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  serial_node                                                                 │
+│    订阅 /gimbal_cmd → 打包 SendPacket(0x55/0xFF) → 串口下发                 │
+└───────────────────────────────┬─────────────────────────────────────────────┘
+                                │   /dev/ttyACM0 @ 460800 8N1
+                                ▼
+                            电控（云台 MCU）
 ```
 
-## 目录结构
+---
+
+## 二、系统组成（三个整合进来的模块）
+
+| 模块 | 文件 | 说明 |
+|---|---|---|
+| 传统装甲识别 | `include/armor_track_ros2/traditional_detector.hpp` / `src/traditional_detector.cpp` | 从 `dahengshibie` 移植，去掉了 `spdlog`/`rm_log` 依赖；HSV 分割 → 灯条筛选 → 灯条配对 → 四点 `[左上,右上,右下,左下]` + 数字 |
+| 串口通信 | `include/armor_track_ros2/serial_driver.hpp` / `src/serial_driver.cpp` / `src/serial_node.cpp` | 自包含 POSIX termios 串口驱动（无 `utils` 框架依赖），协议 `0x55` 头 / `0xFF` 尾 / 无 CRC |
+| 相机标定 / 大恒驱动 | `include/armor_track_ros2/daheng_camera.hpp` / `src/daheng_camera.cpp` / `src/daheng_camera_node.cpp` / `docs/相机标定流程-humble.md` | Galaxy SDK 取流 → Bayer 转 BGR → 发布 `image_raw` + `camera_info`（经 `camera_info_manager`） |
+
+---
+
+## 三、目录结构
 
 ```
 armor_track_ros2/
-├── CMakeLists.txt
-├── package.xml
-├── msg/GimbalCmd.msg                 # 下发消息
-├── config/auto_aim.yaml              # 内参外参/尺寸/跟踪参数
-├── launch/armor_track.launch.py
-├── assets/tiny_resnet.onnx           # 数字识别模型（已从同济仓库复制）
-
+├── CMakeLists.txt / package.xml
+├── msg/GimbalCmd.msg                    # 云台下发指令定义
+├── config/
+│   ├── auto_aim.yaml                    # 识别 / 外参 / 装甲尺寸 / 跟踪 / 串口 总配置
+│   └── daheng_camera.yaml               # 大恒相机驱动参数（序列号/曝光/内参路径…）
+├── launch/
+│   ├── armor_track.launch.py            # 自瞄 + 串口
+│   └── daheng_camera.launch.py          # 大恒相机驱动（跑在 /camera）
+├── assets/tiny_resnet.onnx              # 数字识别模型（9 类，备用）
+├── docs/相机标定流程-humble.md           # 标定完整指南
 ├── include/
-│   ├── armor_track_ros2/armor_detector.hpp
+│   ├── armor_track_ros2/
+│   │   ├── traditional_detector.hpp     # 传统装甲识别
+│   │   ├── traditional_armor.hpp
+│   │   ├── serial_driver.hpp            # 串口驱动
+│   │   └── daheng_camera.hpp            # 大恒相机封装
 │   ├── auto_aim/{armor,classifier,solver,target}.hpp
-│   └── tools/{math_tools,extended_kalman_filter}.hpp
+│   ├── tools/{math_tools,extended_kalman_filter}.hpp
+│   └── sdk/                             # 大恒 Galaxy SDK 头文件（已内置，构建需 libgxiapi.so）
 └── src/
-    ├── auto_aim_node.cpp             # 主节点
-    ├── armor_detector.cpp            # 四点检测占位
+    ├── auto_aim_node.cpp                # 主节点：识别 → PnP → EKF → 发布 gimbal_cmd
+    ├── traditional_detector.cpp
+    ├── serial_node.cpp / serial_driver.cpp
+    ├── daheng_camera_node.cpp / daheng_camera.cpp
     ├── auto_aim/{classifier,solver,target}.cpp
     └── tools/{math_tools,extended_kalman_filter}.cpp
 ```
 
-## 编译
+---
+
+## 四、依赖
+
+- ROS2 **Humble**：`rclcpp`、`sensor_msgs`、`cv_bridge`、`camera_info_manager`（驱动节点用）
+- 三方库：`OpenCV`、`Eigen3`、`yaml-cpp`
+- 大恒相机：官方 Galaxy 驱动已安装（`libgxiapi.so` 在 `/usr/lib`），SDK 头文件已随包内置
+
+---
+
+## 五、编译
 
 ```bash
-cd <你的 ros2 工作空间>/src
-cp -r /home/sunny/Downloads/armor_track_ros2 .
-cd ..
-colcon build --packages-select armor_track_ros2
+# 相机相关依赖（daheng_camera_node 需要；没装会被 CMake 自动跳过，不影响其它节点）
+sudo apt install -y ros-humble-camera-info-manager ros-humble-camera-calibration
+
+# 构建（包目录本身即可当工作空间根，也可放到你的 ws/src/ 下）
+cd ~/Downloads/armor_track_ros2
+source /opt/ros/humble/setup.bash
+colcon build
 source install/setup.bash
+
+# 确认三个可执行都出来了
+ls install/armor_track_ros2/lib/armor_track_ros2/
+# armor_track_node   serial_node   daheng_camera_node
 ```
 
-## 运行
+---
+
+## 六、运行
 
 ```bash
-# 先启动你的相机节点，保证话题为：
-#   /camera/image_raw   (sensor_msgs/Image, bgr8 或可转换编码)
-#   /camera/camera_info (sensor_msgs/CameraInfo)
+source install/setup.bash
+
+# 1) 大恒相机驱动（发布 /camera/image_raw + /camera/camera_info）
+ros2 launch armor_track_ros2 daheng_camera.launch.py
+
+# 2) 自瞄 + 串口下发
 ros2 launch armor_track_ros2 armor_track.launch.py
 
-# 查看输出
+# 查看下发指令
 ros2 topic echo /gimbal_cmd
 ```
 
-## 关键适配点（⚠️ 上线前必须核对）
+> 首次跑相机驱动先看日志里列出的序列号，填进 `config/daheng_camera.yaml` 的 `serial_number`（留空则自动用第一台）；标定步骤见 `docs/相机标定流程-humble.md`。
 
-1. **装甲板物理尺寸** —— `config/auto_aim.yaml` 中 `small_armor_width`、`lightbar_length`
-   必须等于你手持板的实际宽高，否则 PnP 测距成比例地错。
-2. **四点检测** —— `src/armor_detector.cpp` 里 `detectArmorPoints` 目前是占位实现，
-   把它替换成你的传统装甲板检测器（返回无序 `std::vector<cv::Point2f>`，恰好 4 点）。
-3. **相机 → 云台外参** —— `R_camera2gimbal`（3x3 行主序）、`t_camera2gimbal`（m）
-   按你的相机安装位置填，单位阵/零向量只适合相机装在云台旋转中心的情况。
-4. **pitch 符号** —— `pitch_offset` 与下发 `pitch` 的正负取决于你的云台协议，
-   现场标定一下「向上/向下为正」。
-5. **数字识别模型** —— 默认用同济 `tiny_resnet.onnx`（9 类，见 `armor.hpp` 的
-   `ArmorName`）。若你的分类模型类别顺序不同，同步改 `ArmorName` 枚举与模型文件。
-6. **话题名** —— `launch/armor_track.launch.py` 里的 remap 改为你的实际相机话题。
-7. **串口下发** —— 本包只发到 `/gimbal_cmd` 话题，未实现下位机串口；你已有的
-   「视觉底层通信驱动」订阅此话题并透传角度即可。
+---
 
-## 输出消息 GimbalCmd
+## 七、关键配置（`config/auto_aim.yaml`）
+
+| 参数 | 说明 |
+|---|---|
+| `enemy_color` | 敌方颜色 `red`/`blue`（只分割该颜色） |
+| `red_hue_low/high` … `value_high` | HSV 阈值（红色跨色相环，用两段取并集） |
+| `max_angle_error` `min/max_lightbar_ratio` … | 灯条筛选与装甲配对参数 |
+| `R_camera2gimbal` / `t_camera2gimbal` | **相机→云台外参**（3×3 行主序 + 平移 m），需按实际安装填 |
+| `small/big_armor_width` `lightbar_length` | **装甲板物理尺寸（m）**，必须与实际一致，否则 PnP 测距成比例地错 |
+| `latency_ms` `yaw_offset` `pitch_offset` | 延迟补偿 / 零位补偿 |
+| `max_lost_count` `min_lock_count` | 失锁判定 / 锁定判定帧数 |
+| `enable_digit_filter` `digit_model_path` | 数字识别开关（模型未提供，默认关） |
+| `serial_port` / `serial_baud` | 串口设备与波特率（默认 `/dev/ttyACM0` @ `460800` 8N1） |
+
+---
+
+## 八、串口协议
+
+视觉端 → 电控 发送帧 `SendPacket`（`__attribute__((packed))`）：
+
+| 字节 | 字段 | 说明 |
+|---|---|---|
+| 1 | `_SOF = 0x55` | 帧头 |
+| 1 | `ID = 0x02` | 帧类型 |
+| 1 | `AimbotState` | bit0 = 锁定（capture_cmd） |
+| 1 | `AimbotTarget` | 目标编号位图 |
+| 4 | `PitchAbsoluteAngle` | pitch 期望角（**rad**） |
+| 4 | `YawAbsoluteAngle` | yaw 期望角（**rad**） |
+| 4 | `distance` | 距离（m） |
+| 4 | `TargetPitchSpeed` | pitch 角速度（rad/s） |
+| 4 | `TargetYawSpeed` | yaw 角速度（rad/s） |
+| 4 | `SystemTimer` | 系统时间戳（ms） |
+| 1 | `_EOF = 0xFF` | 帧尾 |
+
+> ⚠️ 发送帧里 yaw/pitch 为弧度且**取负**（沿用 `serial_driver` 源码约定）；方向/单位请与电控固件确认，不一致就改 `src/serial_node.cpp` 里 `makeSendPacket` 的负号。
+
+---
+
+## 九、输出消息 `GimbalCmd`
 
 ```yaml
 bool    control      # true=锁定，下位机执行跟随
 float64 yaw          # 云台 yaw   (rad)
 float64 pitch        # 云台 pitch (rad)
 float64 distance     # 目标距离   (m)
-float64 vx vy vz     # 目标线速度 (m/s, 世界系)
+float64 vx vy vz     # 目标线速度 (m/s，世界系)
 float64 yaw_rate     # 视线角速度 yaw   (rad/s)
 float64 pitch_rate   # 视线角速度 pitch (rad/s)
 ```
 
-## 依赖
+---
 
-`rclcpp` `sensor_msgs` `cv_bridge` `OpenCV` `Eigen3` `yaml-cpp`
-（均为 Ubuntu 20.04 上 ROS2 Foxy 常见依赖）。
+## 十、待办 / 已知限制
+
+1. **数字识别模型**：传统检测器自带的 6 类数字 CNN `digit_cnn.onnx` 尚未提供（`enable_digit_filter` 默认 `false`）。训练脚本在 `dahengshibie/tools/train_digit_cnn.py`，训好后填 `digit_model_path` 并置 `true` 即可启用「只保留识别出有效数字的装甲」。
+2. **串口符号/单位**：yaw/pitch 的符号与单位需与电控固件确认后定稿。
+3. **相机标定**：上线前跑一遍 `cameracalibrator`，把内参 yaml 填进 `daheng_camera.yaml` 的 `camera_info_url`。
+4. **外参与尺寸**：`R_camera2gimbal`/`t_camera2gimbal` 和装甲板尺寸务必按实物标定，否则测距与角度偏。
