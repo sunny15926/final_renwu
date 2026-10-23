@@ -1,0 +1,12 @@
+# 大恒 Galaxy 相机驱动参数
+# 用法: ros2 launch armor_track_ros2 daheng_camera.launch.py
+# 或:   ros2 run armor_track_ros2 daheng_camera_node --ros-args -r __ns:=/camera \
+#         -- <config 绝对路径>
+
+serial_number: ""            # 相机序列号；留空则自动用第一台（先跑一次，日志会列出所有序列号）
+exposure_us: 3000.0          # 固定曝光(us)。灯条场景建议短曝光 1000~5000，长曝光会锁死帧率
+gain_db: 8.0                 # 固定增益(dB)，范围 0~32
+frame_id: "camera_optical_frame"
+camera_name: "daheng"        # camera_info 里的相机名，标定 yaml 里的 camera_name 需与此一致
+camera_info_url: ""          # 标定后填内参 yaml，例如 file:///home/sunny/camera_calib/calibration.yaml
+grab_timeout_ms: 1000        # GXDQBuf 取帧超时(ms)，连续失败会自动重连
