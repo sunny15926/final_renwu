@@ -154,23 +154,29 @@ ros2 topic echo /gimbal_cmd
 
 ## 八、串口协议
 
-视觉端 → 电控 发送帧 `SendPacket`（`__attribute__((packed))`）：
+帧头 `0x55`、帧尾 `0xFF`、无 CRC；发送帧 ID=`0x02`，接收帧 ID=`0x01`。
+
+视觉端 → 电控 发送帧 `AimbotFrame`（`__attribute__((packed))`，共 11 字节）：
 
 | 字节 | 字段 | 说明 |
 |---|---|---|
 | 1 | `_SOF = 0x55` | 帧头 |
 | 1 | `ID = 0x02` | 帧类型 |
-| 1 | `AimbotState` | bit0 = 锁定（capture_cmd） |
-| 1 | `AimbotTarget` | 目标编号位图 |
-| 4 | `PitchAbsoluteAngle` | pitch 期望角（**rad**） |
-| 4 | `YawAbsoluteAngle` | yaw 期望角（**rad**） |
-| 4 | `distance` | 距离（m） |
-| 4 | `TargetPitchSpeed` | pitch 角速度（rad/s） |
-| 4 | `TargetYawSpeed` | yaw 角速度（rad/s） |
-| 4 | `SystemTimer` | 系统时间戳（ms） |
+| 4 | `PitchRelativeAngle` | pitch 相对云台零位的期望角（**rad**，正 pitch 向上） |
+| 4 | `YawRelativeAngle` | yaw 相对云台零位的期望角（**rad**，正 yaw 向右） |
 | 1 | `_EOF = 0xFF` | 帧尾 |
 
-> ⚠️ 发送帧里 yaw/pitch 为弧度且**取负**（沿用 `serial_driver` 源码约定）；方向/单位请与电控固件确认，不一致就改 `src/serial_node.cpp` 里 `makeSendPacket` 的负号。
+电控 → 视觉 接收帧 `GimbalImuFrame`（`__attribute__((packed))`，共 19 字节）：
+
+| 字节 | 字段 | 说明 |
+|---|---|---|
+| 1 | `_SOF = 0x55` | 帧头 |
+| 1 | `ID = 0x01` | 帧类型 |
+| 16 | `q0 q1 q2 q3` | 云台四元数（w x y z，各 4 字节 float） |
+| 1 | `_EOF = 0xFF` | 帧尾 |
+
+> ⚠️ 发送帧 yaw/pitch 为弧度且**取负**（`-期望角`）；正 yaw 向右、正 pitch 向上。
+> **跟随规则**：`control=true` 时持续下发 = 跟随；`control=false` 时停发 = 不跟随（实现见 `src/serial_node.cpp`）。
 
 ---
 
@@ -191,6 +197,6 @@ float64 pitch_rate   # 视线角速度 pitch (rad/s)
 ## 十、待办 / 已知限制
 
 1. **数字识别模型**：传统检测器自带的 6 类数字 CNN `digit_cnn.onnx` 尚未提供（`enable_digit_filter` 默认 `false`）。训练脚本在 `dahengshibie/tools/train_digit_cnn.py`，训好后填 `digit_model_path` 并置 `true` 即可启用「只保留识别出有效数字的装甲」。
-2. **串口符号/单位**：yaw/pitch 的符号与单位需与电控固件确认后定稿。
+2. ~~串口符号/单位~~：已按电控协议定稿（rad、取负、正 yaw 向右 / 正 pitch 向上、持续发包=跟随），见 §八。
 3. **相机标定**：上线前跑一遍 `cameracalibrator`，把内参 yaml 填进 `daheng_camera.yaml` 的 `camera_info_url`。
 4. **外参与尺寸**：`R_camera2gimbal`/`t_camera2gimbal` 和装甲板尺寸务必按实物标定，否则测距与角度偏。

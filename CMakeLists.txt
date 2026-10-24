@@ -84,7 +84,14 @@ target_link_libraries(armor_track_node "${cpp_typesupport_target}")
 target_link_libraries(serial_node "${cpp_typesupport_target}")
 
 # ---- 安装 ----
-install(TARGETS tools auto_aim armor_track_node serial_node
+# 共享库放 lib/（setup.bash 会把 lib/ 加进 LD_LIBRARY_PATH），
+# 可执行文件放 lib/${PROJECT_NAME}/（ROS2 标准布局）。混放会导致库找不到。
+install(TARGETS tools auto_aim
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+install(TARGETS armor_track_node serial_node
   DESTINATION lib/${PROJECT_NAME}
 )
 install(DIRECTORY include/ DESTINATION include)

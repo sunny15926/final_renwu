@@ -14,22 +14,15 @@ using namespace std::chrono_literals;
 namespace
 {
 // 把 GimbalCmd（rad）装填进串口发送帧。
-// 注意：符号与单位需与电控固件约定一致，此处沿用 serial_driver 源码的
-//   Pitch/YawAbsoluteAngle = -期望角（rad） 的写法；如电控侧相反，改符号即可。
-serial_driver::SendPacket makeSendPacket(
-  const armor_track_ros2::msg::GimbalCmd & cmd, uint32_t now_ms)
+// 符号与电控约定一致：Pitch/YawRelativeAngle = -期望角（rad），正 yaw 向右、正 pitch 向上。
+serial_driver::AimbotFrame makeSendPacket(
+  const armor_track_ros2::msg::GimbalCmd & cmd)
 {
-  serial_driver::SendPacket pkt{};
+  serial_driver::AimbotFrame pkt{};
   pkt._SOF = serial_driver::SERIAL_HEADER;
-  pkt.ID = serial_driver::RMOS_SEND_ID;
-  pkt.AimbotState = cmd.control ? 0x01 : 0x00;  // bit0 = 锁定（capture_cmd）
-  pkt.AimbotTarget = 0;                         // 目标编号，暂不区分
-  pkt.PitchAbsoluteAngle = -static_cast<float>(cmd.pitch);
-  pkt.YawAbsoluteAngle = -static_cast<float>(cmd.yaw);
-  pkt.distance = static_cast<float>(cmd.distance);
-  pkt.TargetPitchSpeed = static_cast<float>(cmd.pitch_rate);
-  pkt.TargetYawSpeed = static_cast<float>(cmd.yaw_rate);
-  pkt.SystemTimer = now_ms;
+  pkt.ID = serial_driver::AIMBOT_ID;
+  pkt.PitchRelativeAngle = -static_cast<float>(cmd.pitch);
+  pkt.YawRelativeAngle = -static_cast<float>(cmd.yaw);
   pkt._EOF = serial_driver::SERIAL_END;
   return pkt;
 }
@@ -39,8 +32,7 @@ class SerialNode : public rclcpp::Node
 {
 public:
   explicit SerialNode(const std::string & config_path)
-  : Node("serial_node"),
-    start_time_(std::chrono::steady_clock::now())
+  : Node("serial_node")
   {
     auto yaml = YAML::LoadFile(config_path);
     std::string port = yaml["serial_port"].as<std::string>("/dev/ttyACM0");
@@ -77,11 +69,12 @@ private:
       return;  // 未打开串口时静默丢弃（打开失败会在构造时告警）
     }
 
-    auto now_ms = static_cast<uint32_t>(
-      std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - start_time_).count());
+    // 跟随规则：control=true 才持续下发；false 停发 = 不跟随
+    if (!msg->control) {
+      return;
+    }
 
-    auto pkt = makeSendPacket(*msg, now_ms);
+    auto pkt = makeSendPacket(*msg);
     if (!driver_.send(pkt)) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "串口发送失败");
     }
@@ -115,7 +108,6 @@ private:
   std::thread reader_;
   std::atomic<bool> stop_{false};
   std::atomic<int64_t> last_rx_ms_{0};
-  std::chrono::steady_clock::time_point start_time_;
 };
 
 int main(int argc, char ** argv)

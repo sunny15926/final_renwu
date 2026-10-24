@@ -30,6 +30,10 @@ bool SerialDriver::open(const std::string & port, int baud)
   }
 
   configurePort(fd_, baud);
+
+  // 显式拉高 DTR/RTS（与 move_gimbal.py 一致；部分 STM32 CDC 固件据此判断“上位机已连接”才收数据）
+  int modem = TIOCM_DTR | TIOCM_RTS;
+  ioctl(fd_, TIOCMBIS, &modem);
   return true;
 }
 
@@ -41,13 +45,13 @@ void SerialDriver::close()
   }
 }
 
-bool SerialDriver::send(const SendPacket & packet)
+bool SerialDriver::send(const AimbotFrame & packet)
 {
   if (fd_ < 0) return false;
 
   auto bytes = reinterpret_cast<const uint8_t *>(&packet);
-  ssize_t n = ::write(fd_, bytes, sizeof(SendPacket));
-  return n == static_cast<ssize_t>(sizeof(SendPacket));
+  ssize_t n = ::write(fd_, bytes, sizeof(AimbotFrame));
+  return n == static_cast<ssize_t>(sizeof(AimbotFrame));
 }
 
 bool SerialDriver::poll()
