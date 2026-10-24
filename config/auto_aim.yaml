@@ -35,15 +35,16 @@ max_rectangular_error: 25  # degree，灯条与连线垂直误差
 # 是否显示 HSV 二值图（无显示环境务必 false，否则 cv::imshow 报错）
 debug: false
 
-# ---- 传统检测器自带 CNN 数字识别 ----
-# ⚠️ 模型 digit_cnn.onnx（28x28 灰度、6 类 0~5）尚未提供，默认关闭数字过滤。
-# 训练脚本：dahengshibie/tools/train_digit_cnn.py。训练出模型后把路径填到下方
-# 并把 enable_digit_filter 改为 true 即可启用「仅保留识别出有效数字的装甲」。
+# ---- 传统检测器数字识别（ONNX Runtime，7 类：数字 0~5 + 哨兵） ----
+# 填 digit_model_path 即可启用数字识别（结果打印 + 画图可视化）；
+# enable_digit_filter=true 才按数字过滤候选（不识别出有效数字的装甲被剔除）。
 enable_digit_filter: false
-digit_model_path: ""          # 例：../assets/digit_cnn.onnx
+digit_model_path: "/home/sunny/Downloads/armor_track_ros2/Digital-recognition-master/model/model.onnx"
 digit_model_input_size: 28
 digit_class_num: 6
 digit_match_threshold: 0.6    # softmax 最大概率低于该值的候选被剔除
+perspective_debug: true       # 透视矫正 + 数字识别可视化窗口（需图形显示环境 DISPLAY）
+digit_collect_dir: ""         # 数字样本采集目录（如 /home/sunny/digit_dataset）；非空时可视化窗口按键 0~5/s 保存样本
 
 # ===== 相机 -> 云台 外参 =====
 # 相机光心相对云台旋转中心的旋转（3x3，行主序）与平移（m）

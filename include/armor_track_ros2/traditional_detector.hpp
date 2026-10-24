@@ -1,12 +1,15 @@
 #pragma once
 
-#include <opencv2/dnn.hpp>
 #include <opencv2/opencv.hpp>
 
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "armor_track_ros2/traditional_armor.hpp"
+
+// 前向声明：ONNX Runtime 数字识别类（定义见 Digital-recognition-master/include/DigitalRecognition.h）
+class DigitalRecognition;
 
 namespace traditional_armor
 {
@@ -14,11 +17,14 @@ namespace traditional_armor
 // 传统装甲识别类：输入 BGR 图像，输出装甲目标列表。
 // 流水线：图像预处理 → HSV 颜色阈值分割 → 形态学操作 → findContours 提取轮廓
 //         → RotatedRect 筛选灯条 → 灯条两两配对组成装甲板
-//         → 透视矫正 + CNN 数字识别校验（仅保留识别出有效数字 0~5 的装甲）。
+//         → 透视矫正 + ONNX Runtime 数字识别（结果打印/可视化，可按开关过滤）。
 class TraditionalDetector
 {
 public:
   explicit TraditionalDetector(const std::string & config_path);
+
+  // 析构函数在 .cpp 中定义（DigitalRecognition 为前向声明，需完整类型才能析构 unique_ptr）
+  ~TraditionalDetector();
 
   // 识别入口：输入一帧 BGR 图像，返回通过数字校验的装甲板
   std::vector<Armor> detect(const cv::Mat & bgr_img);
@@ -26,8 +32,12 @@ public:
   // 在原图上绘制灯条与装甲框
   void draw(cv::Mat & img, const std::vector<Armor> & armors);
 
-  // 最近一帧全部候选装甲的 CNN 推理总耗时（毫秒），供主循环帧率日志打印
+  // 最近一帧全部候选装甲的数字识别推理总耗时（毫秒），供主循环帧率日志打印
   double last_inference_ms() const { return last_inference_ms_; }
+
+  // 最近一帧第一块装甲的透视矫正图 / 二值化数字（曝光扫描、离线采集分析用）
+  const cv::Mat & last_warp() const { return last_warp_; }
+  const cv::Mat & last_digit() const { return last_digit_; }
 
 private:
   // ---- 颜色 ----
@@ -59,15 +69,21 @@ private:
   bool perspective_debug_;              // 调试开关：透视矫正 + 数字识别 + 额外可视化
   int perspective_height_;              // 矫正后目标高度（像素）
   double digit_match_threshold_;        // 数字识别置信度阈值（softmax 概率，低于该值判定为无效装甲并剔除）
-  bool enable_digit_filter_;            // 数字过滤总开关：false 时跳过数字识别，直接用候选装甲
+  bool enable_digit_filter_;            // 数字过滤开关：true 时剔除未识别出有效数字的候选；false 仅打印/可视化不过滤
   std::vector<Armor> rejected_armors_;  // 被数字识别剔除的候选装甲（仅调试绘制灰框用）
 
-  // ---- CNN 数字识别（OpenCV dnn + onnx） ----
-  std::string digit_model_path_;        // CNN 模型文件路径（onnx）；空字符串则数字识别全部返回 ?
-  int digit_model_input_size_;          // 模型输入尺寸（宽=高，灰度单通道），需与训练时一致
-  int digit_class_num_;                 // 分类类别数（装甲数字 0~5，共 6 类）
-  cv::dnn::Net digit_net_;              // 已加载的 CNN 网络
-  double last_inference_ms_ = 0.0;      // 最近一帧全部候选装甲的 CNN 推理总耗时（毫秒）
+  // ---- 数字识别（ONNX Runtime） ----
+  std::string digit_model_path_;                          // 数字模型文件路径（onnx）；空字符串则数字识别全部返回 ?
+  int digit_model_input_size_;                            // 模型输入尺寸（宽=高，灰度单通道），需与训练时一致
+  int digit_class_num_;                                   // 分类类别数（装甲数字 0~5，共 6 类）
+  std::unique_ptr<DigitalRecognition> digit_recognizer_;  // 已加载的 ONNX Runtime 数字识别器
+  double last_inference_ms_ = 0.0;                        // 最近一帧全部候选装甲的数字推理总耗时（毫秒）
+
+  // 数字样本采集：可视化窗口按键 '0'~'5' 存对应数字、's' 存哨兵，保存到 digit_collect_dir_/<label>/
+  std::string digit_collect_dir_;                         // 采集输出目录（空=不采集）
+  int collect_index_ = 0;                                 // 采集样本自增序号
+  cv::Mat last_warp_;    // 最近一帧第一块装甲的透视矫正图
+  cv::Mat last_digit_;   // 最近一帧的二值化数字（白字黑底）
   // Perspective warp end
 
   // 预处理 + HSV 阈值分割 + 形态学，输出二值图
@@ -86,19 +102,23 @@ private:
   // 透视矫正：把装甲板 4 角点映射到正对矩形，返回矫正后的装甲板小图
   cv::Mat warp_armor(const cv::Mat & img, const Armor & armor) const;
 
-  // 加载 CNN 数字模型（onnx）：读取失败时 digit_net_ 为空，数字识别全部返回 ?
+  // 加载数字模型（onnx，ONNX Runtime）：读取失败时 digit_recognizer_ 为空，数字识别全部返回 ?
   void load_digit_model();
 
-  // CNN 数字识别：裁剪中间数字区域 -> 灰度 -> 归一化 -> 缩放到模型输入尺寸 ->
-  // 送入轻量 CNN 分类，返回预测的数字字符串（0~5）；
-  // 识别失败或置信度不足返回 "?"；confidence 输出最大 softmax 概率（可选），
+  // 数字识别：裁剪中间数字区域后调用 ONNX Runtime 推理（内部完成灰度/缩放/归一化），
+  // 返回预测的数字字符串（0~5）；
+  // 识别失败或置信度不足返回 "?"；confidence 输出 softmax 概率（可选），
   // digit_box 输出数字区域外接框（矫正图坐标，可选，供调试绘制）
   std::string classify_digit(const cv::Mat & warped, double * confidence = nullptr,
-                             cv::Rect * digit_box = nullptr);
+                             cv::Rect * digit_box = nullptr,
+                             cv::Mat * digit_out = nullptr);
 
   // 把矫正图坐标点映射回原图坐标（用于在原图上绘制数字框）
   std::vector<cv::Point2f> map_warped_to_original(
     const Armor & armor, const std::vector<cv::Point2f> & pts) const;
+
+  // 键盘采集样本：key 为 '0'~'5' 存对应数字、's' 存哨兵；digit 为已二值化的白字黑底数字裁剪
+  void handle_digit_collect(int key, const cv::Mat & digit);
   // Perspective warp end
 };
 

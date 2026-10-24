@@ -9,8 +9,10 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include <camera_info_manager/camera_info_manager.hpp>
+#include <rcl_interfaces/msg/set_parameters_result.hpp>
 
 #include "armor_track_ros2/daheng_camera.hpp"
 
@@ -36,6 +38,27 @@ public:
     camera_name_ = yaml["camera_name"].as<std::string>("daheng");
     camera_info_url_ = yaml["camera_info_url"].as<std::string>("");
     grab_timeout_ms_ = yaml["grab_timeout_ms"].as<int>(1000);
+
+    // 运行时调参：ros2 param set /camera/daheng_camera_node exposure_us 4000.0
+    this->declare_parameter<double>("exposure_us", exposure_us_);
+    this->declare_parameter<double>("gain_db", gain_db_);
+    pending_exposure_us_.store(exposure_us_);
+    pending_gain_db_.store(gain_db_);
+    param_cb_handle_ = this->add_on_set_parameters_callback(
+      [this](const std::vector<rclcpp::Parameter> & params) {
+        for (const auto & p : params) {
+          if (p.get_name() == "exposure_us") {
+            pending_exposure_us_.store(p.as_double());
+            params_dirty_.store(true);
+          } else if (p.get_name() == "gain_db") {
+            pending_gain_db_.store(p.as_double());
+            params_dirty_.store(true);
+          }
+        }
+        rcl_interfaces::msg::SetParametersResult result;
+        result.successful = true;
+        return result;
+      });
 
     // 内参管理：带 set_camera_info 服务，标定工具 COMMIT 后可直接回写；
     // camera_info_url 指向标定 yaml（如 file:///home/sunny/camera_calib/calibration.yaml）。
@@ -122,6 +145,15 @@ private:
         }
       }
 
+      // 运行时调参：只在取流线程里写相机参数，避免与取流并发
+      if (params_dirty_.exchange(false)) {
+        double e = pending_exposure_us_.load();
+        double g = pending_gain_db_.load();
+        if (e > 0.0) camera_.setExposure(e);
+        if (g > 0.0) camera_.setGain(g);
+        RCLCPP_INFO(get_logger(), "调参生效: exposure=%.1fus gain=%.1fdB", e, g);
+      }
+
       cv::Mat bgr;
       if (camera_.grab(bgr, grab_timeout_ms_)) {
         fail_count = 0;
@@ -174,7 +206,11 @@ private:
 
   DahengCamera camera_;
   std::thread grab_thread_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_cb_handle_;
   std::atomic<bool> stop_{false};
+  std::atomic<double> pending_exposure_us_{0.0};  // 待应用的曝光（由参数回调写入，取流线程读取）
+  std::atomic<double> pending_gain_db_{0.0};     // 待应用的增益
+  std::atomic<bool> params_dirty_{false};        // 有待应用的参数变更
   bool lib_initialized_ = false;
   bool streaming_ = false;
 };

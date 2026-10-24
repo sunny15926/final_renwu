@@ -4,7 +4,7 @@
 #         -- <config 绝对路径>
 
 serial_number: ""            # 相机序列号；留空则自动用第一台（先跑一次，日志会列出所有序列号）
-exposure_us: 8000.0          # 固定曝光(us)。原 3000 太暗(均值~33)，调亮以稳定灯条检测
+exposure_us: 8000.0          # 固定曝光(us)。诊断结论：8000 灯条 bloom 洗白数字、3000 又太暗——数字不可见属光照问题
 gain_db: 12.0                # 固定增益(dB)，范围 0~32
 frame_id: "camera_optical_frame"
 camera_name: "daheng"        # camera_info 里的相机名，标定 yaml 里的 camera_name 需与此一致

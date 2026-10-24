@@ -5,7 +5,12 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <filesystem>
 #include <iostream>
+#include <memory>
+
+#include "DigitalRecognition.h"
 
 namespace traditional_armor
 {
@@ -52,14 +57,18 @@ TraditionalDetector::TraditionalDetector(const std::string & config_path)
   perspective_height_ = yaml["perspective_height"].as<int>(100);
   digit_match_threshold_ = yaml["digit_match_threshold"].as<double>(0.6);
   enable_digit_filter_ = yaml["enable_digit_filter"].as<bool>(false);  // 数字过滤总开关
+  digit_collect_dir_ = yaml["digit_collect_dir"].as<std::string>("");  // 数字样本采集目录（空=不采集）
 
-  // CNN 数字识别（OpenCV dnn + onnx）
+  // 数字识别（ONNX Runtime）
   digit_model_path_ = yaml["digit_model_path"].as<std::string>("");
   digit_model_input_size_ = yaml["digit_model_input_size"].as<int>(28);
   digit_class_num_ = yaml["digit_class_num"].as<int>(6);
   load_digit_model();
   // Perspective warp end
 }
+
+// 析构函数在 .cpp 中定义：此处 DigitalRecognition 已完整，可正确析构 unique_ptr
+TraditionalDetector::~TraditionalDetector() = default;
 
 std::vector<Armor> TraditionalDetector::detect(const cv::Mat & bgr_img)
 {
@@ -110,33 +119,65 @@ std::vector<Armor> TraditionalDetector::detect(const cv::Mat & bgr_img)
     if (!duplicated[i]) result.emplace_back(armors[i]);
   }
 
-  // 5. CNN 数字识别校验（由总开关 enable_digit_filter_ 控制）
+  // 5. 数字识别：透视矫正 -> ONNX Runtime 推理，结果打印并写入 armor 供可视化
   rejected_armors_.clear();
-  if (!enable_digit_filter_) return result;
-
   std::vector<Armor> valid_result;
   valid_result.reserve(result.size());
   double total_infer_ms = 0.0;
+  cv::Mat show_warp, show_digit;  // 可视化/采集用：最近一块装甲的矫正图与二值化数字
   for (auto & armor : result) {
     cv::Mat warped = warp_armor(bgr_img, armor);  // 透视矫正，得到正对装甲板小图
     double confidence = 0.0;
     std::string digit = "?";
-    if (!warped.empty()) {
+    if (!warped.empty() && digit_recognizer_) {
       auto t0 = std::chrono::steady_clock::now();
-      digit = classify_digit(warped, &confidence, &armor.digit_box);
+      cv::Mat digit_out;
+      digit = classify_digit(warped, &confidence, &armor.digit_box, &digit_out);
+      if (show_warp.empty()) { show_warp = warped.clone(); show_digit = digit_out.clone(); }
       auto t1 = std::chrono::steady_clock::now();
       total_infer_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+      // 识别结果只打印 + 画图可视化，不参与串口发包
+      std::cout << "[traditional_detector] 装甲数字: " << digit
+                << " (置信度 " << confidence << ")" << std::endl;
     }
     armor.digit = digit;
     armor.match_score = confidence;
 
-    if (digit != "?") {  // 识别到有效数字才保留；"?" 表示失败或置信度不足
+    // 仅当 enable_digit_filter_ 开启时才按数字过滤；否则保留全部候选（数字仅用于可视化）
+    if (!enable_digit_filter_ || digit != "?") {
       valid_result.emplace_back(armor);
     } else {
       rejected_armors_.emplace_back(armor);
     }
   }
 
+  // 调试可视化：把装甲框与数字画到原图并显示（perspective_debug_ 开关）
+  if (perspective_debug_) {
+    cv::Mat viz = bgr_img.clone();
+    draw(viz, valid_result);
+    cv::imshow("armor_digit", viz);
+
+    // 额外显示「透视矫正后的装甲板」与「模型实际看到的二值化数字」，便于判断数字是否可见
+    if (!show_warp.empty()) {
+      cv::Mat w;
+      cv::cvtColor(show_warp, w, cv::COLOR_BGR2GRAY);
+      cv::resize(w, w, cv::Size(), 4.0, 4.0, cv::INTER_NEAREST);
+      cv::imshow("armor_warp", w);
+    }
+    if (!show_digit.empty()) {
+      cv::Mat d;
+      cv::resize(show_digit, d, cv::Size(), 10.0, 10.0, cv::INTER_NEAREST);
+      cv::imshow("armor_digit_crop", d);
+    }
+
+    // 按键：'0'~'5' 保存当前数字、's' 保存哨兵（需在 yaml 配置 digit_collect_dir）
+    int key = cv::waitKey(1) & 0xFF;  // 刷新 HighGUI 窗口，否则画面不更新
+    handle_digit_collect(key, show_digit);
+  }
+
+  last_warp_ = show_warp;
+  last_digit_ = show_digit;
   last_inference_ms_ = total_infer_ms;
   return valid_result;
 }
@@ -270,66 +311,121 @@ std::vector<cv::Point2f> TraditionalDetector::map_warped_to_original(
 void TraditionalDetector::load_digit_model()
 {
   if (digit_model_path_.empty()) {
-    std::cerr << "[traditional_detector] 未配置 CNN 数字模型路径（digit_model_path），"
+    std::cerr << "[traditional_detector] 未配置数字模型路径（digit_model_path），"
                  "数字识别将全部返回 ?" << std::endl;
     return;
   }
-  digit_net_ = cv::dnn::readNetFromONNX(digit_model_path_);
-  if (digit_net_.empty()) {
-    std::cerr << "[traditional_detector] 加载 CNN 数字模型失败: " << digit_model_path_
+  try {
+    digit_recognizer_ = std::make_unique<DigitalRecognition>(digit_model_path_);
+    std::cerr << "[traditional_detector] ONNX Runtime 数字模型加载成功: " << digit_model_path_
+              << "（输入 " << digit_model_input_size_ << "x" << digit_model_input_size_
+              << " 灰度单通道，" << digit_class_num_ << " 类 + 哨兵）" << std::endl;
+  } catch (const std::exception & e) {
+    digit_recognizer_.reset();
+    std::cerr << "[traditional_detector] 加载 ONNX Runtime 数字模型失败: " << e.what()
               << std::endl;
-    return;
   }
-  std::cerr << "[traditional_detector] CNN 数字模型加载成功: " << digit_model_path_
-            << "（输入 " << digit_model_input_size_ << "x" << digit_model_input_size_
-            << " 灰度单通道，" << digit_class_num_ << " 类）" << std::endl;
 }
 
 std::string TraditionalDetector::classify_digit(const cv::Mat & warped, double * confidence,
-                                                cv::Rect * digit_box_out)
+                                                cv::Rect * digit_box_out,
+                                                cv::Mat * digit_out)
 {
   if (confidence) *confidence = 0.0;
   if (digit_box_out) *digit_box_out = cv::Rect();
-  if (warped.empty() || digit_net_.empty()) return "?";
+  if (warped.empty() || !digit_recognizer_) return "?";
 
-  // 1. 裁剪中间数字区域：左右两侧约各 1/4 宽为灯条，数字印刷在中间
-  int roi_x = warped.cols / 4;
-  int roi_w = warped.cols / 2;
-  if (roi_w <= 0) return "?";
-  cv::Rect roi(roi_x, 0, roi_w, warped.rows);
-  cv::Mat center = warped(roi);
-
-  if (digit_box_out) *digit_box_out = roi;
-
-  // 2. 转灰度
+  // 对齐训练集预处理：模型期望「白字黑底、数字紧贴框」的 28x28 单个数字。
   cv::Mat gray;
-  cv::cvtColor(center, gray, cv::COLOR_BGR2GRAY);
+  if (warped.channels() == 3) cv::cvtColor(warped, gray, cv::COLOR_BGR2GRAY);
+  else if (warped.channels() == 4) cv::cvtColor(warped, gray, cv::COLOR_BGRA2GRAY);
+  else gray = warped;
 
-  // 3. 归一化到 [0,1] + 缩放到模型输入尺寸，转成 NCHW 单通道 blob
-  cv::Mat blob = cv::dnn::blobFromImage(
-    gray, 1.0 / 255.0, cv::Size(digit_model_input_size_, digit_model_input_size_),
-    cv::Scalar(), false, false);
+  // 1) 先取中间区域（两侧各去掉 25% 排除灯条），数字印刷在中间
+  int cx0 = gray.cols * 25 / 100;
+  int cx1 = gray.cols - cx0;
+  if (cx1 - cx0 < 8) { cx0 = 0; cx1 = gray.cols; }
+  cv::Mat center = gray(cv::Rect(cx0, 0, cx1 - cx0, gray.rows));
 
-  // 4. 前向推理
-  digit_net_.setInput(blob);
-  cv::Mat output = digit_net_.forward();
-  if (output.empty()) return "?";
+  // 2) Otsu 二值化 + 极性自动判断：数字是少数类，统一成白字(255)黑底(0)
+  cv::Mat bin;
+  cv::threshold(center, bin, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
+  int bright = cv::countNonZero(bin);
+  int total = center.rows * center.cols;
+  if (bright > total - bright) cv::bitwise_not(bin, bin);  // 亮是多数 => 数字是暗的 => 取反
 
-  // 5. 展平成一行，取最大概率对应的类别作为预测数字
-  cv::Mat prob = output.reshape(1, 1);
-  cv::Point class_id_point;
-  double max_prob = 0.0;
-  cv::minMaxLoc(prob, nullptr, &max_prob, nullptr, &class_id_point);
-  int class_id = class_id_point.x;
-  if (confidence) *confidence = max_prob;
+  // 3) 连通域：剔除贴左右边缘/满高的灯条，取中间最大者=数字
+  cv::Mat labels, stats, centroids;
+  int n = cv::connectedComponentsWithStats(bin, labels, stats, centroids, 8);
+  int best = -1, best_area = 0;
+  for (int i = 1; i < n; ++i) {
+    int x = stats.at<int>(i, cv::CC_STAT_LEFT);
+    int w = stats.at<int>(i, cv::CC_STAT_WIDTH);
+    int h = stats.at<int>(i, cv::CC_STAT_HEIGHT);
+    int area = stats.at<int>(i, cv::CC_STAT_AREA);
+    if (x <= 2 || x + w >= center.cols - 2) continue;  // 贴边 = 灯条
+    if (h > center.rows * 0.8) continue;               // 满高亮条 = 灯条
+    if (area > best_area) { best_area = area; best = i; }
+  }
 
-  // 6. 置信度不足兜底显示 ?
-  if (class_id < 0 || class_id >= digit_class_num_ || max_prob < digit_match_threshold_) {
+  double conf = 0.0;
+  int label = -1;
+  cv::Mat digit;
+  cv::Rect roi;
+  if (best >= 0 && best_area >= 4) {
+    int bx = stats.at<int>(best, cv::CC_STAT_LEFT);
+    int by = stats.at<int>(best, cv::CC_STAT_TOP);
+    int bw = stats.at<int>(best, cv::CC_STAT_WIDTH);
+    int bh = stats.at<int>(best, cv::CC_STAT_HEIGHT);
+    int pad = std::max(2, std::max(bw, bh) / 6);
+    int x0 = std::max(0, bx - pad);
+    int y0 = std::max(0, by - pad);
+    int x1 = std::min(center.cols, bx + bw + pad);
+    int y1 = std::min(center.rows, by + bh + pad);
+    digit = bin(cv::Rect(x0, y0, x1 - x0, y1 - y0)).clone();  // 白字黑底
+    roi = cv::Rect(cx0 + x0, y0, x1 - x0, y1 - y0);           // 映射回 warp 坐标
+    if (digit_box_out) *digit_box_out = roi;
+    if (digit_out) *digit_out = digit;
+    label = digit_recognizer_->recognize(digit, &conf);
+  }
+
+  // 哨兵(无有效数字) / 越界 / 置信度不足 -> 失败
+  if (label < 0 || label >= digit_class_num_ || conf < digit_match_threshold_) {
     return "?";
   }
-  return std::to_string(class_id);
+  if (confidence) *confidence = conf;
+  return std::to_string(label);
 }
 // Perspective warp end
+
+void TraditionalDetector::handle_digit_collect(int key, const cv::Mat & digit)
+{
+  if (digit_collect_dir_.empty() || digit.empty()) return;
+
+  int label = -1;
+  if (key >= '0' && key <= '5') label = key - '0';
+  else if (key == 's' || key == 'S') label = 6;  // 哨兵（无数字）
+  if (label < 0) return;
+
+  std::filesystem::path dir = std::filesystem::path(digit_collect_dir_) / std::to_string(label);
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  if (ec) {
+    std::cerr << "[traditional_detector] 创建采集目录失败: " << dir << " (" << ec.message()
+              << ")" << std::endl;
+    return;
+  }
+
+  char name[64];
+  std::snprintf(name, sizeof(name), "%06d.png", collect_index_++);
+  std::string path = (dir / name).string();
+  if (cv::imwrite(path, digit)) {
+    std::cout << "[traditional_detector] 已采集样本 -> " << path << " (label=" << label << ")"
+              << std::endl;
+  } else {
+    std::cerr << "[traditional_detector] 保存样本失败: " << path << std::endl;
+  }
+}
 
 void TraditionalDetector::draw(cv::Mat & img, const std::vector<Armor> & armors)
 {
@@ -342,6 +438,14 @@ void TraditionalDetector::draw(cv::Mat & img, const std::vector<Armor> & armors)
     }
 
     cv::circle(img, armor.center, 3, cv::Scalar(0, 0, 255), -1);
+
+    // 数字识别结果可视化：在装甲中心上方标注识别数字
+    if (!armor.digit.empty() && armor.digit != "?") {
+      cv::putText(img, armor.digit,
+                  cv::Point(static_cast<int>(armor.center.x),
+                            static_cast<int>(armor.center.y - 10)),
+                  cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 255, 0), 2);
+    }
   }
 }
 
