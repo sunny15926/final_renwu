@@ -8,12 +8,34 @@
 #include <cstdio>
 #include <filesystem>
 #include <iostream>
+#include <limits>
 #include <memory>
 
 #include "DigitalRecognition.h"
 
 namespace traditional_armor
 {
+
+namespace {
+// 把 img 等比缩放放入固定尺寸画布（黑底居中），使 imshow 窗口尺寸固定、不随内容跳动。
+cv::Mat letterbox(const cv::Mat & img, int canvas_w, int canvas_h)
+{
+  if (img.empty()) return cv::Mat();
+  const double scale = std::min(
+    static_cast<double>(canvas_w) / img.cols, static_cast<double>(canvas_h) / img.rows);
+  cv::Mat resized;
+  cv::resize(img, resized, cv::Size(), scale, scale, cv::INTER_NEAREST);
+  cv::Mat canvas(canvas_h, canvas_w, img.type(), cv::Scalar::all(0));
+  const int x = (canvas_w - resized.cols) / 2;
+  const int y = (canvas_h - resized.rows) / 2;
+  resized.copyTo(canvas(cv::Rect(x, y, resized.cols, resized.rows)));
+  return canvas;
+}
+
+// 固定画布尺寸（像素）
+constexpr int kVizWarpSize = 480;
+constexpr int kVizDigitSize = 280;
+}  // namespace
 
 TraditionalDetector::TraditionalDetector(const std::string & config_path)
 {
@@ -54,7 +76,9 @@ TraditionalDetector::TraditionalDetector(const std::string & config_path)
 
   // Perspective warp start
   perspective_debug_ = yaml["perspective_debug"].as<bool>(false);
+  digit_viz_stable_ = yaml["digit_viz_stable"].as<bool>(true);  // 稳定可视化：固定画布 + 主目标锁定 + 上一帧保持
   perspective_height_ = yaml["perspective_height"].as<int>(100);
+  digit_extend_ratio_ = yaml["digit_extend_ratio"].as<double>(0.5);  // 数字裁剪沿灯条轴线向两头各延伸 1/2 个灯条长度
   digit_match_threshold_ = yaml["digit_match_threshold"].as<double>(0.6);
   enable_digit_filter_ = yaml["enable_digit_filter"].as<bool>(false);  // 数字过滤总开关
   digit_collect_dir_ = yaml["digit_collect_dir"].as<std::string>("");  // 数字样本采集目录（空=不采集）
@@ -124,22 +148,52 @@ std::vector<Armor> TraditionalDetector::detect(const cv::Mat & bgr_img)
   std::vector<Armor> valid_result;
   valid_result.reserve(result.size());
   double total_infer_ms = 0.0;
-  cv::Mat show_warp, show_digit;  // 可视化/采集用：最近一块装甲的矫正图与二值化数字
+
+  // 可视化目标选择：稳定模式优先延续上一帧锁存目标，否则取面积最大者；传统模式取第一块。
+  Armor * viz_target = nullptr;
+  cv::Mat viz_warp, viz_digit;
+  double viz_target_area = -1.0;
+  double viz_best_dist = std::numeric_limits<double>::max();
+
   for (auto & armor : result) {
     cv::Mat warped = warp_armor(bgr_img, armor);  // 透视矫正，得到正对装甲板小图
     double confidence = 0.0;
     std::string digit = "?";
+    cv::Mat digit_out;
     if (!warped.empty() && digit_recognizer_) {
       auto t0 = std::chrono::steady_clock::now();
-      cv::Mat digit_out;
       digit = classify_digit(warped, &confidence, &armor.digit_box, &digit_out);
-      if (show_warp.empty()) { show_warp = warped.clone(); show_digit = digit_out.clone(); }
       auto t1 = std::chrono::steady_clock::now();
       total_infer_ms += std::chrono::duration<double, std::milli>(t1 - t0).count();
 
       // 识别结果只打印 + 画图可视化，不参与串口发包
       std::cout << "[traditional_detector] 装甲数字: " << digit
                 << " (置信度 " << confidence << ")" << std::endl;
+
+      // 面积近似 = 灯条间距 × 灯条长（像素），用于「主目标」选择
+      const double area = cv::norm(armor.right.center - armor.left.center) *
+                          std::max(armor.left.length, armor.right.length);
+      const double dist = viz_valid_ ? cv::norm(armor.center - viz_center_) : 0.0;
+      const bool same = viz_valid_ && dist <= viz_radius_;
+
+      if (digit_viz_stable_) {
+        // 稳定模式：优先延续锁存目标（取中心距离最近者），否则取面积最大者
+        if (same && dist < viz_best_dist) {
+          viz_best_dist = dist;
+          viz_target = &armor;
+          viz_warp = warped;
+          viz_digit = digit_out;
+        } else if (!same && area > viz_target_area) {
+          viz_target_area = area;
+          viz_target = &armor;
+          viz_warp = warped;
+          viz_digit = digit_out;
+        }
+      } else if (viz_target == nullptr) {
+        viz_target = &armor;
+        viz_warp = warped;
+        viz_digit = digit_out;
+      }
     }
     armor.digit = digit;
     armor.match_score = confidence;
@@ -152,6 +206,22 @@ std::vector<Armor> TraditionalDetector::detect(const cv::Mat & bgr_img)
     }
   }
 
+  // 更新/保持可视化锁存状态
+  if (digit_viz_stable_) {
+    if (viz_target != nullptr) {
+      viz_center_ = viz_target->center;
+      viz_radius_ =
+        std::max(150.0, cv::norm(viz_target->right.center - viz_target->left.center) * 1.5);
+      viz_valid_ = true;
+      if (!viz_warp.empty()) last_warp_ = viz_warp;
+      if (!viz_digit.empty()) last_digit_ = viz_digit;  // 数字未识别出时保持上一帧，避免跳变
+    }
+    // 无目标：保持 last_warp_ / last_digit_ 不变（上一帧保持）
+  } else {
+    last_warp_ = viz_warp;
+    last_digit_ = viz_digit;
+  }
+
   // 调试可视化：把装甲框与数字画到原图并显示（perspective_debug_ 开关）
   if (perspective_debug_) {
     cv::Mat viz = bgr_img.clone();
@@ -159,25 +229,31 @@ std::vector<Armor> TraditionalDetector::detect(const cv::Mat & bgr_img)
     cv::imshow("armor_digit", viz);
 
     // 额外显示「透视矫正后的装甲板」与「模型实际看到的二值化数字」，便于判断数字是否可见
-    if (!show_warp.empty()) {
+    if (!last_warp_.empty()) {
       cv::Mat w;
-      cv::cvtColor(show_warp, w, cv::COLOR_BGR2GRAY);
-      cv::resize(w, w, cv::Size(), 4.0, 4.0, cv::INTER_NEAREST);
+      cv::cvtColor(last_warp_, w, cv::COLOR_BGR2GRAY);
+      if (digit_viz_stable_) {
+        w = letterbox(w, kVizWarpSize, kVizWarpSize);  // 固定画布，窗口尺寸不跳
+      } else {
+        cv::resize(w, w, cv::Size(), 4.0, 4.0, cv::INTER_NEAREST);
+      }
       cv::imshow("armor_warp", w);
     }
-    if (!show_digit.empty()) {
+    if (!last_digit_.empty()) {
       cv::Mat d;
-      cv::resize(show_digit, d, cv::Size(), 10.0, 10.0, cv::INTER_NEAREST);
+      if (digit_viz_stable_) {
+        d = letterbox(last_digit_, kVizDigitSize, kVizDigitSize);  // 固定画布
+      } else {
+        cv::resize(last_digit_, d, cv::Size(), 10.0, 10.0, cv::INTER_NEAREST);
+      }
       cv::imshow("armor_digit_crop", d);
     }
 
     // 按键：'0'~'5' 保存当前数字、's' 保存哨兵（需在 yaml 配置 digit_collect_dir）
     int key = cv::waitKey(1) & 0xFF;  // 刷新 HighGUI 窗口，否则画面不更新
-    handle_digit_collect(key, show_digit);
+    handle_digit_collect(key, last_digit_);
   }
 
-  last_warp_ = show_warp;
-  last_digit_ = show_digit;
   last_inference_ms_ = total_infer_ms;
   return valid_result;
 }
@@ -261,8 +337,18 @@ bool TraditionalDetector::check_armor(const Armor & armor) const
 // Perspective warp start
 cv::Mat TraditionalDetector::warp_armor(const cv::Mat & img, const Armor & armor) const
 {
-  // 源四角点：armor.points 顺序为 左上、右上、右下、左下
+  // 源四角点：armor.points 顺序为 左上、右上、右下、左下（紧贴灯条两端）。
+  // 沿灯条轴线向两头各延伸 digit_extend_ratio_ 个灯条长度，扩大裁剪范围，
+  // 使数字印刷区略超出灯条两端时仍能被完整纳入。
   std::vector<cv::Point2f> src = armor.points;
+  if (digit_extend_ratio_ > 0.0) {
+    const cv::Point2f ext_l = armor.left.top2bottom * digit_extend_ratio_;
+    const cv::Point2f ext_r = armor.right.top2bottom * digit_extend_ratio_;
+    src[0] -= ext_l;  // 左上，向上延伸
+    src[3] += ext_l;  // 左下，向下延伸
+    src[1] -= ext_r;  // 右上，向上延伸
+    src[2] += ext_r;  // 右下，向下延伸
+  }
 
   float width = static_cast<float>(cv::norm(armor.right.center - armor.left.center));
   float height = std::max(armor.left.length, armor.right.length);
@@ -270,7 +356,8 @@ cv::Mat TraditionalDetector::warp_armor(const cv::Mat & img, const Armor & armor
 
   float scale = static_cast<float>(perspective_height_) / height;
   int dst_w = std::max(1, cvRound(width * scale));
-  int dst_h = perspective_height_;
+  // 目标高度按延伸比例同步放大，保持灯条仍映射为 perspective_height_ 像素（数字不被压缩）
+  int dst_h = std::max(1, cvRound(perspective_height_ * (1.0 + 2.0 * digit_extend_ratio_)));
 
   std::vector<cv::Point2f> dst = {
     cv::Point2f(0.0f, 0.0f),

@@ -67,7 +67,9 @@ private:
 
   // Perspective warp start
   bool perspective_debug_;              // 调试开关：透视矫正 + 数字识别 + 额外可视化
+  bool digit_viz_stable_;               // 稳定可视化：固定画布 + 主目标锁定 + 上一帧保持
   int perspective_height_;              // 矫正后目标高度（像素）
+  double digit_extend_ratio_;           // 数字裁剪沿灯条轴线向两头延伸比例（单位=灯条长度）
   double digit_match_threshold_;        // 数字识别置信度阈值（softmax 概率，低于该值判定为无效装甲并剔除）
   bool enable_digit_filter_;            // 数字过滤开关：true 时剔除未识别出有效数字的候选；false 仅打印/可视化不过滤
   std::vector<Armor> rejected_armors_;  // 被数字识别剔除的候选装甲（仅调试绘制灰框用）
@@ -82,8 +84,11 @@ private:
   // 数字样本采集：可视化窗口按键 '0'~'5' 存对应数字、's' 存哨兵，保存到 digit_collect_dir_/<label>/
   std::string digit_collect_dir_;                         // 采集输出目录（空=不采集）
   int collect_index_ = 0;                                 // 采集样本自增序号
-  cv::Mat last_warp_;    // 最近一帧第一块装甲的透视矫正图
-  cv::Mat last_digit_;   // 最近一帧的二值化数字（白字黑底）
+  cv::Mat last_warp_;    // 最近一帧用于显示的透视矫正图（稳定模式=锁存主目标）
+  cv::Mat last_digit_;   // 最近一帧用于显示的二值化数字（白字黑底，稳定模式=锁存）
+  cv::Point2f viz_center_;   // 稳定模式锁存目标中心（原图坐标）
+  double viz_radius_ = 0.0;  // 稳定模式锁存目标身份匹配半径（像素）
+  bool viz_valid_ = false;   // 稳定模式是否已有锁存目标
   // Perspective warp end
 
   // 预处理 + HSV 阈值分割 + 形态学，输出二值图
