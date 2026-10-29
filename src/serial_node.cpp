@@ -14,15 +14,15 @@ using namespace std::chrono_literals;
 namespace
 {
 // 把 GimbalCmd（rad）装填进串口发送帧。
-// 符号与电控约定一致：Pitch/YawRelativeAngle = -期望角（rad），正 yaw 向右、正 pitch 向上。
+// 符号与电控约定一致：Pitch/YawRelativeAngle = 期望角（rad，不取负），正 yaw 向右、正 pitch 向上。
 serial_driver::AimbotFrame makeSendPacket(
   const armor_track_ros2::msg::GimbalCmd & cmd)
 {
   serial_driver::AimbotFrame pkt{};
   pkt._SOF = serial_driver::SERIAL_HEADER;
   pkt.ID = serial_driver::AIMBOT_ID;
-  pkt.PitchRelativeAngle = -static_cast<float>(cmd.pitch);
-  pkt.YawRelativeAngle = -static_cast<float>(cmd.yaw);
+  pkt.PitchRelativeAngle = static_cast<float>(cmd.pitch);
+  pkt.YawRelativeAngle = static_cast<float>(cmd.yaw);
   pkt._EOF = serial_driver::SERIAL_END;
   return pkt;
 }

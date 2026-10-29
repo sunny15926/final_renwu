@@ -75,5 +75,5 @@ publish_rate: 30.0         # 下发频率（Hz），0 表示按相机帧率
 # ===== 串口（serial_node） =====
 serial_port: "/dev/ttyACM0"   # 串口设备节点
 serial_baud: 460800           # 波特率（8N1）
-# 说明：发送帧 yaw/pitch 为弧度，符号取负（沿用 serial_driver 源码约定）。
-# 若电控侧方向相反，改 src/serial_node.cpp 里 makeSendPacket 的负号即可。
+# 说明：发送帧 yaw/pitch 为弧度，符号不取负（直接发期望角）。
+# 若电控侧方向相反，改 src/serial_node.cpp 里 makeSendPacket 的正负号即可。

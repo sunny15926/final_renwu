@@ -68,8 +68,10 @@ armor_track_ros2/
 ├── launch/
 │   ├── armor_track.launch.py            # 自瞄 + 串口
 │   └── daheng_camera.launch.py          # 大恒相机驱动（跑在 /camera）
-├── assets/tiny_resnet.onnx              # 数字识别模型（9 类，备用）
+├── assets/tiny_resnet.onnx              # 旧数字模型（9 类，未接线，现用 Digital-recognition-master/model/model.onnx）
+├── Digital-recognition-master/          # 数字识别 ONNX Runtime 推理 + LeNet 模型（model/model.onnx，7 类）
 ├── docs/相机标定流程-humble.md           # 标定完整指南
+├── scripts/                             # 诊断/采集/重训脚本（frame_sweep、retrain_digit、telemetry_probe …）
 ├── include/
 │   ├── armor_track_ros2/
 │   │   ├── traditional_detector.hpp     # 传统装甲识别
@@ -136,7 +138,30 @@ ros2 topic echo /gimbal_cmd
 
 ---
 
-## 七、关键配置（`config/auto_aim.yaml`）
+## 七、关键配置
+
+### 相机内参（PnP 输入）
+
+PnP（`solvePnP`）用的内参**不写死在代码里**，而是运行时从 `/camera/camera_info` 话题订阅，链路如下：
+
+```
+config/daheng_camera.yaml → camera_info_url → 标定 yaml
+        │  (camera_info_manager 解析)
+        ▼
+daheng_camera_node 发布 /camera/camera_info  (k=相机矩阵, d=畸变系数)
+        │  (auto_aim_node 订阅)
+        ▼
+solver_.set_camera(msg->k, msg->d) → cv::solvePnP(..., camera_matrix_, distort_coeffs_, ...)
+```
+
+- 内参路径：`config/daheng_camera.yaml` 的 `camera_info_url`，当前指向 `/home/sunny/camera_calib/calibration.yaml`（**占位估算值**）。
+- 当前生效内参（1920×1200，`camera_name: daheng`）：
+  - 内参矩阵 `K`：fx=1574.77，fy=1574.32，cx=962.50，cy=596.60
+  - 畸变系数 `D`（`plumb_bob`，顺序 k1,k2,p1,p2,k3）：`[-0.242, 0.157, -0.000127, 0.000891, 0]`
+- 注意：该 yaml 里 `projection_matrix`（fx≈1455 / fy≈1520）与 `camera_matrix` 不一致，但节点只取 `k`/`d`，**PnP 不受 P 影响**；若后续要做去畸变/rectify，再核对 P。
+- 另有 `/home/sunny/camera_calib/calibration_chessboard.yaml` 未被 `camera_info_url` 引用，不生效。
+
+### 自瞄参数（`config/auto_aim.yaml`）
 
 | 参数 | 说明 |
 |---|---|
@@ -147,7 +172,10 @@ ros2 topic echo /gimbal_cmd
 | `small/big_armor_width` `lightbar_length` | **装甲板物理尺寸（m）**，必须与实际一致，否则 PnP 测距成比例地错 |
 | `latency_ms` `yaw_offset` `pitch_offset` | 延迟补偿 / 零位补偿 |
 | `max_lost_count` `min_lock_count` | 失锁判定 / 锁定判定帧数 |
-| `enable_digit_filter` `digit_model_path` | 数字识别开关（模型未提供，默认关） |
+| `digit_model_path` `enable_digit_filter` | 数字识别 ONNX Runtime 模型路径 + 过滤开关（模型见 `Digital-recognition-master/model/model.onnx`，7 类：数字 0~5 + 哨兵） |
+| `digit_model_input_size` `digit_class_num` | 网络输入尺寸（28×28）/ 数字类别数（6=数字 0~5，哨兵为第 7 类索引 6） |
+| `digit_match_threshold` `digit_extend_ratio` | 置信度阈值 / 数字裁剪沿灯条轴线向外扩的比例（单位=灯条长度） |
+| `perspective_debug` `digit_viz_stable` `digit_collect_dir` | 透视+数字可视化 / 稳定可视化 / 样本采集目录（可视化窗口按键 `0~5` 存数字、`s` 存哨兵） |
 | `serial_port` / `serial_baud` | 串口设备与波特率（默认 `/dev/ttyACM0` @ `460800` 8N1） |
 
 ---
@@ -175,7 +203,7 @@ ros2 topic echo /gimbal_cmd
 | 16 | `q0 q1 q2 q3` | 云台四元数（w x y z，各 4 字节 float） |
 | 1 | `_EOF = 0xFF` | 帧尾 |
 
-> ⚠️ 发送帧 yaw/pitch 为弧度且**取负**（`-期望角`）；正 yaw 向右、正 pitch 向上。
+> ⚠️ 发送帧 yaw/pitch 为弧度、**不取负**（直接发期望角）；正 yaw 向右、正 pitch 向上。
 > **跟随规则**：`control=true` 时持续下发 = 跟随；`control=false` 时停发 = 不跟随（实现见 `src/serial_node.cpp`）。
 
 ---
@@ -196,7 +224,7 @@ float64 pitch_rate   # 视线角速度 pitch (rad/s)
 
 ## 十、待办 / 已知限制
 
-1. **数字识别模型**：传统检测器自带的 6 类数字 CNN `digit_cnn.onnx` 尚未提供（`enable_digit_filter` 默认 `false`）。训练脚本在 `dahengshibie/tools/train_digit_cnn.py`，训好后填 `digit_model_path` 并置 `true` 即可启用「只保留识别出有效数字的装甲」。
-2. ~~串口符号/单位~~：已按电控协议定稿（rad、取负、正 yaw 向右 / 正 pitch 向上、持续发包=跟随），见 §八。
-3. **相机标定**：上线前跑一遍 `cameracalibrator`，把内参 yaml 填进 `daheng_camera.yaml` 的 `camera_info_url`。
+1. **数字识别**：已接入 ONNX Runtime 推理（LeNet，28×28 灰度、白字黑底），模型 `Digital-recognition-master/model/model.onnx`（7 类：数字 0~5 + 哨兵）。样本采集（可视化窗口按键 `0~5`/`s`）与重训脚本 `scripts/retrain_digit.py` 已具备；`enable_digit_filter` 默认 `false`，置 `true` 后按数字过滤候选。
+2. ~~串口符号/单位~~：已按电控协议定稿（rad、不取负、正 yaw 向右 / 正 pitch 向上、持续发包=跟随），见 §八。
+3. **相机标定**：当前 `camera_info_url` 指向 `/home/sunny/camera_calib/calibration.yaml`，内参为**占位估算值**（K≈[1574.77, 962.50; 1574.32, 596.60]，D=[-0.242, 0.157, -0.0001, 0.0009, 0]），上线前跑 `cameracalibrator` 正式标定并覆盖该 yaml（见 §七 相机内参）。
 4. **外参与尺寸**：`R_camera2gimbal`/`t_camera2gimbal` 和装甲板尺寸务必按实物标定，否则测距与角度偏。
