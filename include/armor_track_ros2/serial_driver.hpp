@@ -51,16 +51,14 @@ public:
   // 发送一帧；失败返回 false
   bool send(const AimbotFrame & packet);
 
-  // 非阻塞读取并丢弃接收字节（防止接收缓冲积满），有数据返回 true。
-  // 由接收线程周期性调用。
-  bool poll();
+  // 非阻塞读取：把当前可读字节追加到 out；读到数据返回 true。由接收线程周期性调用。
+  bool read(std::vector<uint8_t> & out);
 
 private:
   int openPort(const char * port);
   int configurePort(int fd, int baud);
 
   int fd_ = -1;
-  std::vector<uint8_t> rx_buf_;  // 接收临时缓冲
 };
 
 }  // namespace serial_driver

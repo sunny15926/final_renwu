@@ -54,7 +54,7 @@ bool SerialDriver::send(const AimbotFrame & packet)
   return n == static_cast<ssize_t>(sizeof(AimbotFrame));
 }
 
-bool SerialDriver::poll()
+bool SerialDriver::read(std::vector<uint8_t> & out)
 {
   if (fd_ < 0) return false;
 
@@ -62,8 +62,10 @@ bool SerialDriver::poll()
   if (ioctl(fd_, FIONREAD, &available) != 0) return false;
   if (available <= 0) return false;
 
-  rx_buf_.resize(static_cast<size_t>(available));
-  ssize_t n = ::read(fd_, rx_buf_.data(), available);
+  size_t old = out.size();
+  out.resize(old + static_cast<size_t>(available));
+  ssize_t n = ::read(fd_, out.data() + old, static_cast<size_t>(available));
+  if (n > 0) out.resize(old + static_cast<size_t>(n));
   return n > 0;
 }
 

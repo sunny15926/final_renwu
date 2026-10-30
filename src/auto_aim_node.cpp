@@ -4,17 +4,15 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <yaml-cpp/yaml.h>
 
-#include <algorithm>
+#include <array>
 #include <chrono>
 #include <memory>
 #include <vector>
 
 #include "armor_track_ros2/msg/gimbal_cmd.hpp"
+#include "armor_track_ros2/msg/gimbal_feedback.hpp"
 #include "armor_track_ros2/traditional_detector.hpp"
-#include "auto_aim/armor.hpp"
-#include "auto_aim/solver.hpp"
-#include "auto_aim/target.hpp"
-#include "tools/math_tools.hpp"
+#include "auto_aim/closed_loop_solver.hpp"
 
 using namespace std::chrono_literals;
 
@@ -33,24 +31,12 @@ cv::Mat toCvMatD(const std::vector<double> & d)
   for (size_t i = 0; i < d.size(); ++i) m.at<double>(i) = d[i];
   return m;
 }
-
-// 传统检测器数字（"0"~"5" / "?"）映射到 auto_aim 的 ArmorName。
-// 传统模型仅 6 类（数字 0~5），0 通常对应基地/前哨；"?" 表示识别失败。
-auto_aim::ArmorName nameFromDigit(const std::string & digit)
-{
-  if (digit == "1") return auto_aim::one;
-  if (digit == "2") return auto_aim::two;
-  if (digit == "3") return auto_aim::three;
-  if (digit == "4") return auto_aim::four;
-  if (digit == "5") return auto_aim::five;
-  if (digit == "0") return auto_aim::base;
-  return auto_aim::not_armor;
-}
 }  // namespace
 
 namespace armor_track_ros2
 {
 using GimbalCmd = armor_track_ros2::msg::GimbalCmd;
+using GimbalFeedback = armor_track_ros2::msg::GimbalFeedback;
 
 class AutoAimNode : public rclcpp::Node
 {
@@ -58,15 +44,11 @@ public:
   explicit AutoAimNode(const std::string & config_path)
   : Node("armor_track_node"),
     detector_(config_path),
-    solver_(config_path)
+    closed_loop_(config_path)
   {
     auto yaml = YAML::LoadFile(config_path);
-    latency_ms_ = yaml["latency_ms"].as<double>();
-    yaw_offset_ = yaml["yaw_offset"].as<double>();
-    pitch_offset_ = yaml["pitch_offset"].as<double>();
-    max_lost_count_ = yaml["max_lost_count"].as<int>();
-    min_lock_count_ = yaml["min_lock_count"].as<int>();
-    double publish_rate = yaml["publish_rate"].as<double>();
+    double publish_rate = yaml["publish_rate"].as<double>(30.0);
+    imu_timeout_ms_ = yaml["closed_loop_imu_timeout_ms"].as<int>(100);
 
     camera_sub_ = create_subscription<sensor_msgs::msg::Image>(
       "image_raw", rclcpp::SensorDataQoS(),
@@ -74,6 +56,9 @@ public:
     info_sub_ = create_subscription<sensor_msgs::msg::CameraInfo>(
       "camera_info", rclcpp::SensorDataQoS(),
       std::bind(&AutoAimNode::infoCallback, this, std::placeholders::_1));
+    feedback_sub_ = create_subscription<GimbalFeedback>(
+      "gimbal_feedback", 10,
+      std::bind(&AutoAimNode::feedbackCallback, this, std::placeholders::_1));
 
     cmd_pub_ = create_publisher<GimbalCmd>("gimbal_cmd", 10);
 
@@ -83,7 +68,7 @@ public:
                     : std::chrono::milliseconds(33);
     timer_ = create_wall_timer(period, std::bind(&AutoAimNode::timerCallback, this));
 
-    RCLCPP_INFO(get_logger(), "armor_track_node started, config: %s", config_path.c_str());
+    RCLCPP_INFO(get_logger(), "armor_track_node (closed-loop) started, config: %s", config_path.c_str());
   }
 
 private:
@@ -91,15 +76,22 @@ private:
   {
     camera_matrix_ = toCvMat33(msg->k);
     distort_coeffs_ = toCvMatD(msg->d);
-    solver_.set_camera(camera_matrix_, distort_coeffs_);
+    closed_loop_.set_camera(camera_matrix_, distort_coeffs_);
     info_received_ = true;
+  }
+
+  void feedbackCallback(const GimbalFeedback::SharedPtr msg)
+  {
+    gimbal_yaw_ = msg->yaw;
+    gimbal_pitch_ = msg->pitch;
+    imu_received_ = true;
+    last_imu_ms_ = nowMs();
   }
 
   void imageCallback(const sensor_msgs::msg::Image::SharedPtr msg)
   {
     if (!info_received_) {
-      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000,
-                           "waiting for camera_info ...");
+      RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "waiting for camera_info ...");
       return;
     }
 
@@ -110,92 +102,62 @@ private:
       RCLCPP_ERROR(get_logger(), "cv_bridge error: %s", e.what());
       return;
     }
-    const cv::Mat & bgr = cv_ptr->image;
 
-    // ① 传统装甲识别：HSV 分割 -> 灯条配对 -> 装甲四点 + 数字
-    auto armors = detector_.detect(bgr);
-    if (armors.empty()) {
-      lost_count_++;
-      lock_count_ = 0;
-      return;
+    // ① 传统装甲识别（数字筛选在检测器内按开关处理，这里只取第一个目标）。
+    auto armors = detector_.detect(cv_ptr->image);
+    bool armor_valid = !armors.empty();
+
+    std::vector<cv::Point2f> points;
+    auto_aim::ArmorType type = auto_aim::ArmorType::small;  // 大小装甲判定放外层，先按小装甲
+    if (armor_valid) {
+      points = armors.front().points;
     }
 
-    // 取第一个目标（灯条已按 x 排序；多目标时这里可改为选置信度最高/最靠近中心者）
-    const auto & best = armors.front();
+    // ② IMU 新鲜度判定（超时视为失效）。
+    bool imu_valid = imu_received_ && (nowMs() - last_imu_ms_ < imu_timeout_ms_);
 
-    // ② 映射到 auto_aim::Armor（points 已是 [左上, 右上, 右下, 左下] 的 PnP 顺序）
-    auto_aim::Armor armor;
-    armor.points = best.points;
-    armor.center = best.center;
-    armor.name = nameFromDigit(best.digit);
-    armor.confidence = best.match_score;
-    armor.type = auto_aim::ArmorType::small;  // 手持板为小装甲，如需大装甲按尺寸判定
+    // ③ 闭环解算（PnP + 坐标变换 + 滤波 + 限幅 + 保护）。
+    auto res = closed_loop_.aim(armor_valid, imu_valid, points, type, gimbal_yaw_, gimbal_pitch_);
 
-    // ③ PnP + 坐标变换 -> ypd_in_world
-    solver_.solve(armor);
-    auto ypd = armor.ypd_in_world;
-
-    // ④ 6 维 EKF 更新
-    auto now = std::chrono::steady_clock::now();
-    if (!target_.initialized()) {
-      target_.init(armor.xyz_in_world, 0.0);
-      last_time_ = now;
-    } else {
-      double dt = tools::delta_time(now, last_time_);
-      last_time_ = now;
-      target_.update(ypd, dt);
-    }
-
-    // ⑤ 延迟补偿：用速度外推到下发时刻
-    double dt_lat = latency_ms_ / 1000.0;
-    Eigen::Vector3d compensated = target_.position() + target_.linear_velocity() * dt_lat;
-    auto ypd_cmd = tools::xyz2ypd(compensated);
-
-    lock_count_++;
-    lost_count_ = 0;
-
-    // 组装下发指令
-    latest_cmd_.control = (lock_count_ >= min_lock_count_);
-    latest_cmd_.yaw = ypd_cmd[0] + yaw_offset_;
-    latest_cmd_.pitch = ypd_cmd[1] + pitch_offset_;
-    latest_cmd_.distance = ypd_cmd[2];
-    auto v = target_.linear_velocity();
-    latest_cmd_.vx = v[0];
-    latest_cmd_.vy = v[1];
-    latest_cmd_.vz = v[2];
-    auto w = target_.angular_velocity();
-    latest_cmd_.yaw_rate = w[0];
-    latest_cmd_.pitch_rate = w[1];
+    latest_cmd_.control = res.control;
+    latest_cmd_.yaw = res.yaw;
+    latest_cmd_.pitch = res.pitch;
+    latest_cmd_.distance = res.xyz_in_world.norm();
+    // 无 EKF/预测：速度与角速度一律置 0。
+    latest_cmd_.vx = latest_cmd_.vy = latest_cmd_.vz = 0.0;
+    latest_cmd_.yaw_rate = latest_cmd_.pitch_rate = 0.0;
   }
 
   void timerCallback()
   {
-    if (lost_count_ >= max_lost_count_) latest_cmd_.control = false;
     cmd_pub_->publish(latest_cmd_);
+  }
+
+  static int64_t nowMs()
+  {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::steady_clock::now().time_since_epoch()).count();
   }
 
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr camera_sub_;
   rclcpp::Subscription<sensor_msgs::msg::CameraInfo>::SharedPtr info_sub_;
+  rclcpp::Subscription<GimbalFeedback>::SharedPtr feedback_sub_;
   rclcpp::Publisher<GimbalCmd>::SharedPtr cmd_pub_;
   rclcpp::TimerBase::SharedPtr timer_;
 
   traditional_armor::TraditionalDetector detector_;
-  auto_aim::Solver solver_;
-  auto_aim::Target target_;
+  auto_aim::ClosedLoopSolver closed_loop_;
 
   cv::Mat camera_matrix_;
   cv::Mat distort_coeffs_;
   bool info_received_ = false;
 
-  double latency_ms_;
-  double yaw_offset_;
-  double pitch_offset_;
-  int max_lost_count_;
-  int min_lock_count_;
-  int lock_count_ = 0;
-  int lost_count_ = 0;
+  double gimbal_yaw_ = 0.0;
+  double gimbal_pitch_ = 0.0;
+  bool imu_received_ = false;
+  int64_t last_imu_ms_ = 0;
+  int imu_timeout_ms_ = 100;
 
-  std::chrono::steady_clock::time_point last_time_;
   GimbalCmd latest_cmd_;
 };
 

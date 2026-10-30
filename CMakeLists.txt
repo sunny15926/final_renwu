@@ -34,25 +34,16 @@ message(STATUS "ONNX Runtime library: ${ONNXRUNTIME_LIBRARY}")
 # 自定义消息：云台下发指令
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/GimbalCmd.msg"
+  "msg/GimbalFeedback.msg"
 )
 
-# ---- 工具库（无 ROS 依赖）----
-add_library(tools
-  src/math_tools.cpp
-  src/extended_kalman_filter.cpp
-)
-target_include_directories(tools PUBLIC include)
-target_link_libraries(tools PUBLIC Eigen3::Eigen)
-
-# ---- 视觉算法库：数字识别 + PnP + 6 维 EKF ----
+# ---- 闭环自瞄解算库（PnP + 坐标变换 + 一阶低通滤波 + 限幅）----
 add_library(auto_aim
-  src/classifier.cpp
-  src/solver.cpp
-  src/target.cpp
+  src/closed_loop_solver.cpp
 )
 target_include_directories(auto_aim PUBLIC include)
 target_link_libraries(auto_aim
-  PUBLIC tools Eigen3::Eigen ${OpenCV_LIBS} yaml-cpp
+  PUBLIC Eigen3::Eigen ${OpenCV_LIBS} yaml-cpp
 )
 
 # ---- 主节点（传统装甲识别 + 自瞄解算）----
@@ -112,7 +103,7 @@ target_link_libraries(serial_node "${cpp_typesupport_target}")
 # ---- 安装 ----
 # 共享库放 lib/（setup.bash 会把 lib/ 加进 LD_LIBRARY_PATH），
 # 可执行文件放 lib/${PROJECT_NAME}/（ROS2 标准布局）。混放会导致库找不到。
-install(TARGETS tools auto_aim
+install(TARGETS auto_aim
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin

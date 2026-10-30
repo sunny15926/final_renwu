@@ -1,5 +1,5 @@
 # ============================================================
-# armor_track_ros2 总配置（传统装甲识别 + 自瞄解算 + 串口）
+# armor_track_ros2 总配置（传统装甲识别 + 闭环自瞄 + 串口）
 # ============================================================
 
 #####----- 传统装甲识别（traditional_detector）-----#####
@@ -48,31 +48,22 @@ perspective_debug: true       # 透视矫正 + 数字识别可视化窗口（需
 digit_viz_stable: true        # 稳定可视化：固定画布 + 主目标锁定 + 上一帧保持（关掉回旧行为）
 digit_collect_dir: ""         # 数字样本采集目录（如 /home/sunny/digit_dataset）；非空时可视化窗口按键 0~5/s 保存样本
 
-# ===== 相机 -> 云台 外参 =====
-# 相机光心相对云台旋转中心的旋转（3x3，行主序）与平移（m）
-R_camera2gimbal:
-  [1.0, 0.0, 0.0,
-   0.0, 1.0, 0.0,
-   0.0, 0.0, 1.0]
-t_camera2gimbal: [0.0, 0.0, 0.0]
-
-# ===== 装甲板物理尺寸（⚠️ 必须与实际手持板一致，否则 PnP 测距不准） =====
+#####----- 装甲板物理尺寸（⚠️ 必须与实际板一致，否则 PnP 测距不准） -----#####
 small_armor_width: 0.135   # 小装甲板宽（m）
 big_armor_width:   0.230   # 大装甲板宽（m）
 lightbar_length:   0.056   # 灯条长（m，即装甲板高度方向）
 
-# ===== 跟踪 / 跟随 =====
-latency_ms: 50             # 视觉链路延迟补偿（ms），用于角速度前馈量级
-yaw_offset:   0.0          # 云台 yaw 零位补偿（rad）
-pitch_offset: 0.0          # 云台 pitch 零位补偿（rad）
+#####----- 闭环自瞄（closed_loop_solver） -----#####
+# Eye-in-Hand：用云台 IMU 回传的 yaw/pitch 构造旋转矩阵做闭环，不做手眼标定。
+closed_loop_alpha: 0.3            # 一阶低通滤波系数 (0,1]，越小越平滑
+closed_loop_angle_limit: 0.3      # 输出角度限幅（rad）
+closed_loop_imu_timeout_ms: 100   # IMU 超时判定失效（ms），超时角度置 0 停止跟随
+closed_loop_debug: true           # 打印 tvec/云台姿态/世界坐标/滤波前后角度
 
-max_lost_count: 20         # 连续丢失多少帧判定失锁（control=false）
-min_lock_count:  5         # 连续锁定多少帧才输出 control=true（抑制抖动）
-
-# ===== 节点默认参数（可被 launch 覆盖） =====
+#####----- 节点默认参数（可被 launch 覆盖） -----#####
 publish_rate: 30.0         # 下发频率（Hz），0 表示按相机帧率
 
-# ===== 串口（serial_node） =====
+#####----- 串口（serial_node） -----#####
 serial_port: "/dev/ttyACM0"   # 串口设备节点
 serial_baud: 460800           # 波特率（8N1）
 # 说明：发送帧 yaw/pitch 为弧度，符号不取负（直接发期望角）。
