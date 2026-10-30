@@ -2,6 +2,7 @@
 
 #include <yaml-cpp/yaml.h>
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 
@@ -27,6 +28,15 @@ ClosedLoopSolver::ClosedLoopSolver(const std::string & config_path)
   alpha_ = yaml["closed_loop_alpha"].as<double>(0.3);
   angle_limit_ = yaml["closed_loop_angle_limit"].as<double>(0.3);
   debug_ = yaml["closed_loop_debug"].as<bool>(false);
+
+  // EKF 参数（6 维 [x,vx,y,vy,z,vz]）：过程噪声与量测噪声，越小越平滑。
+  EKF::Config ekf_cfg;
+  ekf_cfg.sigma_acc = yaml["ekf_sigma_acc"].as<double>(2.0);
+  ekf_cfg.sigma_x = yaml["ekf_sigma_x"].as<double>(0.02);
+  ekf_cfg.sigma_y = yaml["ekf_sigma_y"].as<double>(0.02);
+  ekf_cfg.sigma_z = yaml["ekf_sigma_z"].as<double>(0.02);
+  ekf_.set_config(ekf_cfg);
+  ekf_max_dt_ = yaml["ekf_max_dt"].as<double>(0.5);
 }
 
 void ClosedLoopSolver::set_camera(const cv::Mat & camera_matrix, const cv::Mat & distort_coeffs)
@@ -48,6 +58,8 @@ ClosedLoopSolver::Result ClosedLoopSolver::aim(
     filter_initialized_ = false;
     yaw_filt_ = 0.0;
     pitch_filt_ = 0.0;
+    ekf_.reset();
+    ekf_time_valid_ = false;
     return r;  // valid=false, control=false, 角度全 0
   }
 
@@ -94,12 +106,48 @@ ClosedLoopSolver::Result ClosedLoopSolver::aim(
   Eigen::Matrix3d R_C2W = Rz * Ry * R0;
   r.xyz_in_world = R_C2W * p_cam;
 
-  // ③ 世界系下 atan2 目标角（yaw 右正、pitch 上正）。
+  // ③ EKF：匀速直线模型估计 [x,vx,y,vy,z,vz]，并由此求线速度与视线角速度。
+  {
+    const auto now = std::chrono::steady_clock::now();
+    const Eigen::Vector3d meas(r.xyz_in_world[0], r.xyz_in_world[1], r.xyz_in_world[2]);
+    if (!ekf_.initialized()) {
+      ekf_.init(meas);
+    } else {
+      double dt = 0.0;
+      if (ekf_time_valid_) {
+        dt = std::chrono::duration<double>(now - last_ekf_t_).count();
+        dt = clamp(dt, 0.0, ekf_max_dt_);
+      }
+      ekf_.predict(dt);
+      ekf_.update(meas);
+    }
+    last_ekf_t_ = now;
+    ekf_time_valid_ = true;
+
+    r.ekf_state = ekf_.x();
+    const double x = r.ekf_state[0], vx = r.ekf_state[1];
+    const double y = r.ekf_state[2], vy = r.ekf_state[3];
+    const double z = r.ekf_state[4], vz = r.ekf_state[5];
+
+    r.linear_speed = std::sqrt(vx * vx + vy * vy + vz * vz);
+
+    // 视线角速度：世界系目标方位角对时间的一阶导。
+    //   yaw   = atan2(y, x)                  ->  yaw_rate   = (x*vy - y*vx) / (x^2+y^2)
+    //   pitch = atan2(z, hypot(x,y))         ->  pitch_rate = (r_xy^2*vz - z*(x*vx+y*vy)) / (r_xy*(r_xy^2+z^2))
+    const double r_xy = std::hypot(x, y);
+    r.yaw_rate = (r_xy > 1e-6) ? (x * vy - y * vx) / (r_xy * r_xy) : 0.0;
+    const double r2 = r_xy * r_xy + z * z;
+    r.pitch_rate = (r_xy > 1e-6 && r2 > 1e-9)
+                     ? (r_xy * r_xy * vz - z * (x * vx + y * vy)) / (r_xy * r2)
+                     : 0.0;
+  }
+
+  // ④ 世界系下 atan2 目标角（yaw 右正、pitch 上正）。
   double xw = r.xyz_in_world[0], yw = r.xyz_in_world[1], zw = r.xyz_in_world[2];
   r.yaw_raw = std::atan2(yw, xw);
   r.pitch_raw = std::atan2(zw, std::hypot(xw, yw));
 
-  // ④ 一阶低通滤波（存未限幅的滤波值，避免饱和；限幅只作用于输出）。
+  // ⑤ 一阶低通滤波（存未限幅的滤波值，避免饱和；限幅只作用于输出）。
   if (!filter_initialized_) {
     yaw_filt_ = r.yaw_raw;
     pitch_filt_ = r.pitch_raw;
@@ -109,7 +157,7 @@ ClosedLoopSolver::Result ClosedLoopSolver::aim(
     pitch_filt_ = alpha_ * r.pitch_raw + (1.0 - alpha_) * pitch_filt_;
   }
 
-  // ⑤ 限幅。
+  // ⑥ 限幅。
   r.yaw = clamp(yaw_filt_, -angle_limit_, angle_limit_);
   r.pitch = clamp(pitch_filt_, -angle_limit_, angle_limit_);
 
@@ -119,9 +167,10 @@ ClosedLoopSolver::Result ClosedLoopSolver::aim(
   if (debug_) {
     std::printf(
       "[closed_loop] tvec=(%.3f,%.3f,%.3f) gimbal=(%.3f,%.3f) world=(%.3f,%.3f,%.3f) "
-      "raw=(%.3f,%.3f) -> filt=(%.3f,%.3f)\n",
+      "raw=(%.3f,%.3f) -> filt=(%.3f,%.3f) | EKF z=%.3f v=%.3f dYaw=%.3f dPitch=%.3f\n",
       tvec[0], tvec[1], tvec[2], gimbal_yaw, gimbal_pitch,
-      xw, yw, zw, r.yaw_raw, r.pitch_raw, r.yaw, r.pitch);
+      xw, yw, zw, r.yaw_raw, r.pitch_raw, r.yaw, r.pitch,
+      r.ekf_state[4], r.linear_speed, r.yaw_rate, r.pitch_rate);
   }
 
   return r;

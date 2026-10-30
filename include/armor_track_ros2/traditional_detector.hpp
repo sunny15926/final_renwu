@@ -32,6 +32,9 @@ public:
   // 在原图上绘制灯条与装甲框
   void draw(cv::Mat & img, const std::vector<Armor> & armors);
 
+  // 设置叠加到可视化窗口左上角的文本（多行，'\n' 分隔）；空串清除。由外层（auto_aim_node）每帧写入。
+  void set_overlay_text(const std::string & text) { overlay_text_ = text; }
+
   // 最近一帧全部候选装甲的数字识别推理总耗时（毫秒），供主循环帧率日志打印
   double last_inference_ms() const { return last_inference_ms_; }
 
@@ -90,6 +93,8 @@ private:
   double viz_radius_ = 0.0;  // 稳定模式锁存目标身份匹配半径（像素）
   bool viz_valid_ = false;   // 稳定模式是否已有锁存目标
   // Perspective warp end
+
+  std::string overlay_text_;  // 叠加到可视化窗口左上角的文本（由外层 set_overlay_text 设置）
 
   // 预处理 + HSV 阈值分割 + 形态学，输出二值图
   cv::Mat preprocess(const cv::Mat & bgr_img);

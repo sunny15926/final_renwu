@@ -10,6 +10,7 @@
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <sstream>
 
 #include "DigitalRecognition.h"
 
@@ -226,6 +227,18 @@ std::vector<Armor> TraditionalDetector::detect(const cv::Mat & bgr_img)
   if (perspective_debug_) {
     cv::Mat viz = bgr_img.clone();
     draw(viz, valid_result);
+    // 左上角叠加文本（如 EKF 估计结果，由外层 auto_aim_node 每帧写入）
+    if (!overlay_text_.empty()) {
+      int base_y = 24;
+      const int line_h = 22;
+      std::istringstream iss(overlay_text_);
+      std::string line;
+      while (std::getline(iss, line)) {
+        cv::putText(viz, line, cv::Point(10, base_y),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0, 255, 255), 1, cv::LINE_AA);
+        base_y += line_h;
+      }
+    }
     cv::imshow("armor_digit", viz);
 
     // 额外显示「透视矫正后的装甲板」与「模型实际看到的二值化数字」，便于判断数字是否可见

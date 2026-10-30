@@ -6,6 +6,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdio>
 #include <memory>
 #include <vector>
 
@@ -145,9 +146,27 @@ private:
     latest_cmd_.yaw = res.yaw;
     latest_cmd_.pitch = res.pitch;
     latest_cmd_.distance = res.xyz_in_world.norm();
-    // 无 EKF/预测：速度与角速度一律置 0。
-    latest_cmd_.vx = latest_cmd_.vy = latest_cmd_.vz = 0.0;
-    latest_cmd_.yaw_rate = latest_cmd_.pitch_rate = 0.0;
+    // 6 维 EKF 估计的目标线速度与视线角速度（世界系）。
+    latest_cmd_.vx = res.ekf_state[1];
+    latest_cmd_.vy = res.ekf_state[3];
+    latest_cmd_.vz = res.ekf_state[5];
+    latest_cmd_.yaw_rate = res.yaw_rate;
+    latest_cmd_.pitch_rate = res.pitch_rate;
+
+    // 屏幕左上角叠加显示：EKF 估计的高低差(z)、线速度、视线角速度。
+    // 注意：OpenCV Hershey 字体不支持中文，故标签用英文。
+    if (res.valid) {
+      char buf[256];
+      std::snprintf(buf, sizeof(buf),
+        "EKF [x,vx,y,vy,z,vz]\n"
+        " height z   : %+6.3f m\n"
+        " linear vel : %6.3f m/s\n"
+        " LOS rate   : yaw %+6.3f  pitch %+6.3f rad/s",
+        res.ekf_state[4], res.linear_speed, res.yaw_rate, res.pitch_rate);
+      detector_.set_overlay_text(buf);
+    } else {
+      detector_.set_overlay_text("");
+    }
   }
 
   void timerCallback()

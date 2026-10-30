@@ -66,6 +66,15 @@ closed_loop_angle_limit: 0.3      # 输出角度限幅（rad）
 closed_loop_imu_timeout_ms: 100   # IMU 超时判定失效（ms），超时角度置 0 停止跟随
 closed_loop_debug: true           # 打印 tvec/云台姿态/世界坐标/滤波前后角度
 
+#####----- 6 维扩展卡尔曼滤波（EKF，估计 [x,vx,y,vy,z,vz]） -----#####
+# 状态/量测均在闭环世界系（X 前 / Y 右 / Z 上）。匀速直线模型 + 位置量测。
+# 越小越平滑、响应越慢；越大越信任量测、速度估计越抖。
+ekf_sigma_acc: 2.0                # 过程噪声：加速度扰动标准差 (m/s^2)
+ekf_sigma_x: 0.02                 # 量测噪声标准差 x (m)
+ekf_sigma_y: 0.02                 # 量测噪声标准差 y (m)
+ekf_sigma_z: 0.02                 # 量测噪声标准差 z (m)
+ekf_max_dt: 0.5                   # 预测步长上限（s），防止帧间隔异常导致 Q 发散
+
 #####----- 节点默认参数（可被 launch 覆盖） -----#####
 publish_rate: 30.0         # 下发频率（Hz），0 表示按相机帧率
 

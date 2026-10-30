@@ -4,8 +4,11 @@
 #include <Eigen/Dense>
 #include <opencv2/opencv.hpp>
 
+#include <chrono>
 #include <string>
 #include <vector>
+
+#include "auto_aim/ekf.hpp"
 
 namespace auto_aim
 {
@@ -37,6 +40,12 @@ public:
     double pitch_raw = 0.0;          // 滤波前目标 pitch（rad）
     double yaw = 0.0;                // 滤波后 + 限幅的目标 yaw（rad）
     double pitch = 0.0;              // 滤波后 + 限幅的目标 pitch（rad）
+
+    // ---- EKF 估计输出（世界系） ----
+    Eigen::Matrix<double, 6, 1> ekf_state = Eigen::Matrix<double, 6, 1>::Zero();  // [x,vx,y,vy,z,vz]
+    double linear_speed = 0.0;       // 线速度模长 (m/s)
+    double yaw_rate = 0.0;           // 视线角速度 yaw（rad/s，右为正）
+    double pitch_rate = 0.0;         // 视线角速度 pitch（rad/s，上为正）
   };
 
   explicit ClosedLoopSolver(const std::string & config_path);
@@ -63,6 +72,11 @@ private:
   bool filter_initialized_ = false;
   double yaw_filt_ = 0.0;
   double pitch_filt_ = 0.0;
+
+  EKF ekf_;                                  // 6 维 EKF：估计 [x,vx,y,vy,z,vz]
+  std::chrono::steady_clock::time_point last_ekf_t_;  // 上一有效帧时刻（算 dt）
+  bool ekf_time_valid_ = false;              // 是否已有上一有效帧时刻
+  double ekf_max_dt_ = 0.5;                  // dt 上限（s），防止帧间隔异常导致 Q 发散
 
   bool debug_ = false;
 };

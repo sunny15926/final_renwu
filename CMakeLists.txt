@@ -37,9 +37,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/GimbalFeedback.msg"
 )
 
-# ---- 闭环自瞄解算库（PnP + 坐标变换 + 一阶低通滤波 + 限幅）----
+# ---- 闭环自瞄解算库（PnP + 坐标变换 + 一阶低通滤波 + 限幅 + 6维EKF）----
 add_library(auto_aim
   src/closed_loop_solver.cpp
+  src/ekf.cpp
 )
 target_include_directories(auto_aim PUBLIC include)
 target_link_libraries(auto_aim
