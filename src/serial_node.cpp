@@ -25,7 +25,7 @@ constexpr double PI = 3.14159265358979323846;
 constexpr double IMU_YAW_SIGN = 1.0;    // 电控回传 yaw 的符号（四元数 -> yaw 后乘）
 constexpr double IMU_PITCH_SIGN = 1.0;  // 电控回传 pitch 的符号
 constexpr double CMD_YAW_SIGN = 1.0;    // 下发 yaw 的符号
-constexpr double CMD_PITCH_SIGN = 1.0;  // 下发 pitch 的符号
+constexpr double CMD_PITCH_SIGN = -1.0;  // 下发 pitch 的符号（上下跟随方向反了，取反）
 
 // 把 GimbalCmd（rad）装填进串口发送帧。
 // 符号与电控约定一致：Pitch/YawRelativeAngle = 期望角（rad），正 yaw 向右、正 pitch 向上。
