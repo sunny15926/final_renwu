@@ -144,8 +144,6 @@ bool DahengCamera::startStream()
     setError("获取数据流失败");
     return false;
   }
-  GXGetDataStreamHandleFromDev(device_, 1, &stream_handle_);
-
   // SDK 内部取流缓存 5 个，并分配 Bayer -> RGB 转换输出缓冲
   GXSetAcqusitionBufferNumber(device_, 5);
   rgb_buffer_[0] = static_cast<unsigned char *>(
