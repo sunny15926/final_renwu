@@ -50,7 +50,6 @@ std::vector<Armor> TraditionalDetector::detect(const cv::Mat & bgr_img)
 {
   // 1. 图像预处理 + HSV 颜色阈值分割 + 形态学，得到二值图
   auto binary_img = preprocess(bgr_img);
-  if (debug_) cv::imshow("binary", binary_img);
 
   // 2. findContours 提取轮廓 + RotatedRect 筛选灯条
   auto lightbars = extract_lightbars(binary_img);
@@ -95,7 +94,8 @@ std::vector<Armor> TraditionalDetector::detect(const cv::Mat & bgr_img)
     if (!duplicated[i]) result.emplace_back(armors[i]);
   }
 
-  // 5. 调试可视化：绘制装甲框 + 叠加 overlay_text_（EKF 状态等，由外层每帧写入）
+  // 5. 调试可视化：在原图副本上绘制装甲框 + 叠加 overlay_text_，再把显示副本缩小后 imshow。
+  //    仅缩放这份显示副本；送入算法的 bgr_img 保持原始分辨率不变。
   if (debug_) {
     cv::Mat viz = bgr_img.clone();
     draw(viz, result);
@@ -110,7 +110,9 @@ std::vector<Armor> TraditionalDetector::detect(const cv::Mat & bgr_img)
         base_y += line_h;
       }
     }
-    cv::imshow("armor", viz);
+    cv::Mat display;
+    cv::resize(viz, display, cv::Size(), 0.25, 0.25, cv::INTER_AREA);  // 显示缩到 0.25 倍
+    cv::imshow("armor", display);
     cv::waitKey(1);
   }
 
