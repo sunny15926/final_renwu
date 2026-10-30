@@ -21,6 +21,11 @@ using namespace std::chrono_literals;
 namespace armor_track_ros2
 {
 
+// 曝光时间（微秒）常量：直接改这个数即可微调画面亮度，改完重新编译生效。
+// 曝光只改变画面亮度，不改变图像几何信息，因此不影响内参 / PnP 解算，也不影响送入 detector 的原图。
+// yaml 里 exposure_us 填了非 0 值时以 yaml 为准；此处作为 yaml 未填时的默认值。
+constexpr double kExposureUs = 6000.0;
+
 // 大恒 Galaxy 相机 ROS2 驱动：
 //   发布 image_raw (bgr8) + camera_info（经 camera_info_manager，支持 camera_info_url 加载标定内参）。
 //   命名空间建议跑在 /camera，与 armor_track.launch.py 的重映射 (/camera/image_raw、/camera/camera_info) 对齐。
@@ -32,7 +37,7 @@ public:
   {
     auto yaml = YAML::LoadFile(config_path);
     serial_ = yaml["serial_number"].as<std::string>("");
-    exposure_us_ = yaml["exposure_us"].as<double>(0.0);
+    exposure_us_ = yaml["exposure_us"].as<double>(kExposureUs);
     gain_db_ = yaml["gain_db"].as<double>(0.0);
     frame_id_ = yaml["frame_id"].as<std::string>("camera_optical_frame");
     camera_name_ = yaml["camera_name"].as<std::string>("daheng");
