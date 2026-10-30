@@ -48,6 +48,12 @@ perspective_debug: true       # 透视矫正 + 数字识别可视化窗口（需
 digit_viz_stable: true        # 稳定可视化：固定画布 + 主目标锁定 + 上一帧保持（关掉回旧行为）
 digit_collect_dir: ""         # 数字样本采集目录（如 /home/sunny/digit_dataset）；非空时可视化窗口按键 0~5/s 保存样本
 
+# ---- 北科大 Reborn 数字分类器（独立插拔式，ONNX Runtime，9 类：1~5 + outpost/guard/base/negative） ----
+# 用装甲板【四个角点】做透视矫正后分类，输出装甲编号 0~5（0=非编号目标，1~5=数字）。
+# 结果只作为附加信息打印/记录，不影响闭环云台跟随与串口下发。
+# 填 num_classifier_model_path 即可启用；留空则完全不加载该分类器。
+num_classifier_model_path: "/home/sunny/Downloads/armor_track_ros2/assets/number_classifier.onnx"
+
 #####----- 装甲板物理尺寸（⚠️ 必须与实际板一致，否则 PnP 测距不准） -----#####
 small_armor_width: 0.135   # 小装甲板宽（m）
 big_armor_width:   0.230   # 大装甲板宽（m）

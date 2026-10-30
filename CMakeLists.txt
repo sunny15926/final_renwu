@@ -50,6 +50,7 @@ target_link_libraries(auto_aim
 add_executable(armor_track_node
   src/auto_aim_node.cpp
   src/traditional_detector.cpp
+  src/num_classifier.cpp
   Digital-recognition-master/src/DigitalRecognition.cpp
 )
 ament_target_dependencies(armor_track_node rclcpp sensor_msgs cv_bridge)
