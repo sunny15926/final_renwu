@@ -11,7 +11,7 @@ RoboMaster 风格的 **ROS2（Humble / Ubuntu 22.04）视觉自瞄包**：把「
 具体能做的几件事：
 
 1. **相机驱动 + 标定**：内置大恒 Galaxy 相机驱动 `daheng_camera_node`，发布 `image_raw` + `camera_info`，配合 ROS 的 `cameracalibrator` 完成内参标定，为 PnP 测距提供内参。
-2. **实时装甲板检测**：纯传统视觉（HSV 颜色分割 → 形态学 → 灯条拟合 → 灯条配对 → 装甲四点），不依赖深度学习也能跑，帧率高、对算力要求低；可选接一个数字识别 CNN 来绑定装甲编号。
+2. **实时装甲板检测**：纯传统视觉（HSV 颜色分割 → 形态学 → 灯条拟合 → 灯条配对 → 装甲四点），不依赖深度学习也能跑，帧率高、对算力要求低。
 3. **目标 3D 定位与测距**：对装甲四点做 `solvePnP`（IPPE）解出相机系下的 3D 位置，再经相机→云台外参换到云台/世界系，得到距离。
 4. **运动跟踪与预测**：6 维扩展卡尔曼滤波（`[x,vx,y,vy,z,vz]`）估计目标线速度与视线角速度，并做延迟补偿，预测下发时刻的位置。
 5. **云台控制下发**：把解算出的 yaw/pitch/距离/角速度打包成 `GimbalCmd`，再由 `serial_node` 通过串口（`0x55` 帧头 / `0xFF` 帧尾、无 CRC）发给电控执行跟随。
@@ -27,7 +27,7 @@ RoboMaster 风格的 **ROS2（Humble / Ubuntu 22.04）视觉自瞄包**：把「
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  armor_track_node                                                            │
-│   传统装甲识别（HSV→灯条→配对→四点+数字）                                     │
+│   传统装甲识别（HSV→灯条→配对→四点）                                     │
 │        → PnP(solvePnP IPPE) 相机系 3D 位置                                   │
 │        → 外参变换 相机系→云台系→世界系                                        │
 │        → 6 维 EKF 跟踪 + 延迟补偿                                            │
@@ -50,7 +50,7 @@ RoboMaster 风格的 **ROS2（Humble / Ubuntu 22.04）视觉自瞄包**：把「
 
 | 模块 | 文件 | 说明 |
 |---|---|---|
-| 传统装甲识别 | `include/armor_track_ros2/traditional_detector.hpp` / `src/traditional_detector.cpp` | 从 `dahengshibie` 移植，去掉了 `spdlog`/`rm_log` 依赖；HSV 分割 → 灯条筛选 → 灯条配对 → 四点 `[左上,右上,右下,左下]` + 数字 |
+| 传统装甲识别 | `include/armor_track_ros2/traditional_detector.hpp` / `src/traditional_detector.cpp` | 从 `dahengshibie` 移植，去掉了 `spdlog`/`rm_log` 依赖；HSV 分割 → 灯条筛选 → 灯条配对 → 四点 `[左上,右上,右下,左下]` |
 | 串口通信 | `include/armor_track_ros2/serial_driver.hpp` / `src/serial_driver.cpp` / `src/serial_node.cpp` | 自包含 POSIX termios 串口驱动（无 `utils` 框架依赖），协议 `0x55` 头 / `0xFF` 尾 / 无 CRC |
 | 相机标定 / 大恒驱动 | `include/armor_track_ros2/daheng_camera.hpp` / `src/daheng_camera.cpp` / `src/daheng_camera_node.cpp` / `docs/相机标定流程-humble.md` | Galaxy SDK 取流 → Bayer 转 BGR → 发布 `image_raw` + `camera_info`（经 `camera_info_manager`） |
 
@@ -68,10 +68,8 @@ armor_track_ros2/
 ├── launch/
 │   ├── armor_track.launch.py            # 自瞄 + 串口
 │   └── daheng_camera.launch.py          # 大恒相机驱动（跑在 /camera）
-├── assets/tiny_resnet.onnx              # 旧数字模型（9 类，未接线，现用 Digital-recognition-master/model/model.onnx）
-├── Digital-recognition-master/          # 数字识别 ONNX Runtime 推理 + LeNet 模型（model/model.onnx，7 类）
 ├── docs/相机标定流程-humble.md           # 标定完整指南
-├── scripts/                             # 诊断/采集/重训脚本（frame_sweep、retrain_digit、telemetry_probe …）
+├── scripts/                             # 诊断/采集脚本（frame_sweep、telemetry_probe …）
 ├── include/
 │   ├── armor_track_ros2/
 │   │   ├── traditional_detector.hpp     # 传统装甲识别
@@ -172,10 +170,6 @@ solver_.set_camera(msg->k, msg->d) → cv::solvePnP(..., camera_matrix_, distort
 | `small/big_armor_width` `lightbar_length` | **装甲板物理尺寸（m）**，必须与实际一致，否则 PnP 测距成比例地错 |
 | `latency_ms` `yaw_offset` `pitch_offset` | 延迟补偿 / 零位补偿 |
 | `max_lost_count` `min_lock_count` | 失锁判定 / 锁定判定帧数 |
-| `digit_model_path` `enable_digit_filter` | 数字识别 ONNX Runtime 模型路径 + 过滤开关（模型见 `Digital-recognition-master/model/model.onnx`，7 类：数字 0~5 + 哨兵） |
-| `digit_model_input_size` `digit_class_num` | 网络输入尺寸（28×28）/ 数字类别数（6=数字 0~5，哨兵为第 7 类索引 6） |
-| `digit_match_threshold` `digit_extend_ratio` | 置信度阈值 / 数字裁剪沿灯条轴线向外扩的比例（单位=灯条长度） |
-| `perspective_debug` `digit_viz_stable` `digit_collect_dir` | 透视+数字可视化 / 稳定可视化 / 样本采集目录（可视化窗口按键 `0~5` 存数字、`s` 存哨兵） |
 | `serial_port` / `serial_baud` | 串口设备与波特率（默认 `/dev/ttyACM0` @ `460800` 8N1） |
 
 ---
@@ -224,7 +218,6 @@ float64 pitch_rate   # 视线角速度 pitch (rad/s)
 
 ## 十、待办 / 已知限制
 
-1. **数字识别**：已接入 ONNX Runtime 推理（LeNet，28×28 灰度、白字黑底），模型 `Digital-recognition-master/model/model.onnx`（7 类：数字 0~5 + 哨兵）。样本采集（可视化窗口按键 `0~5`/`s`）与重训脚本 `scripts/retrain_digit.py` 已具备；`enable_digit_filter` 默认 `false`，置 `true` 后按数字过滤候选。
-2. ~~串口符号/单位~~：已按电控协议定稿（rad、不取负、正 yaw 向右 / 正 pitch 向上、持续发包=跟随），见 §八。
-3. **相机标定**：当前 `camera_info_url` 指向 `/home/sunny/camera_calib/calibration.yaml`，内参为**占位估算值**（K≈[1574.77, 962.50; 1574.32, 596.60]，D=[-0.242, 0.157, -0.0001, 0.0009, 0]），上线前跑 `cameracalibrator` 正式标定并覆盖该 yaml（见 §七 相机内参）。
-4. **外参与尺寸**：`R_camera2gimbal`/`t_camera2gimbal` 和装甲板尺寸务必按实物标定，否则测距与角度偏。
+1. ~~串口符号/单位~~：已按电控协议定稿（rad、不取负、正 yaw 向右 / 正 pitch 向上、持续发包=跟随），见 §八。
+2. **相机标定**：当前 `camera_info_url` 指向 `/home/sunny/camera_calib/calibration.yaml`，内参为**占位估算值**（K≈[1574.77, 962.50; 1574.32, 596.60]，D=[-0.242, 0.157, -0.0001, 0.0009, 0]），上线前跑 `cameracalibrator` 正式标定并覆盖该 yaml（见 §七 相机内参）。
+3. **外参与尺寸**：`R_camera2gimbal`/`t_camera2gimbal` 和装甲板尺寸务必按实物标定，否则测距与角度偏。

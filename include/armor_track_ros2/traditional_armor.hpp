@@ -49,11 +49,6 @@ struct Armor
   double side_ratio;           // 左右灯条长度比 = 长灯条 / 短灯条
   double rectangular_error;    // 灯条与两灯条中心连线所成夹角与 π/2 的差值（rad）
 
-  // ---- 数字识别结果（透视矫正 + CNN 分类后填充） ----
-  std::string digit = "?";     // 识别到的装甲数字；识别失败/置信度不足时为 "?"
-  double match_score = 0.0;    // CNN 分类置信度（softmax 最大概率，0~1）
-  cv::Rect digit_box;          // 数字区域外接框（矫正图坐标，即 warp_armor 输出图内）；空 Rect 表示未找到
-
   Armor(const Lightbar & left, const Lightbar & right);
 };
 

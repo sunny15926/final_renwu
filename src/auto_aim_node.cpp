@@ -14,7 +14,6 @@
 #include "armor_track_ros2/msg/gimbal_feedback.hpp"
 #include "armor_track_ros2/traditional_detector.hpp"
 #include "auto_aim/closed_loop_solver.hpp"
-#include "num_classifier.hpp"
 
 using namespace std::chrono_literals;
 
@@ -51,17 +50,6 @@ public:
     auto yaml = YAML::LoadFile(config_path);
     double publish_rate = yaml["publish_rate"].as<double>(30.0);
     imu_timeout_ms_ = yaml["closed_loop_imu_timeout_ms"].as<int>(100);
-
-    // 数字分类器（附加信息，可选）：配置 num_classifier_model_path 才启用，不影响云台跟随
-    std::string num_model_path = yaml["num_classifier_model_path"].as<std::string>("");
-    if (!num_model_path.empty()) {
-      num_classifier_ = std::make_unique<NumClassifier>(num_model_path);
-      if (num_classifier_->is_loaded()) {
-        RCLCPP_INFO(get_logger(), "数字分类器已加载: %s", num_model_path.c_str());
-      } else {
-        num_classifier_.reset();
-      }
-    }
 
     camera_sub_ = create_subscription<sensor_msgs::msg::Image>(
       "image_raw", rclcpp::SensorDataQoS(),
@@ -116,7 +104,7 @@ private:
       return;
     }
 
-    // ① 传统装甲识别（数字筛选在检测器内按开关处理，这里只取第一个目标）。
+    // ① 传统装甲识别（灯条配对直接给出装甲四点，这里只取第一个目标）。
     auto armors = detector_.detect(cv_ptr->image);
     bool armor_valid = !armors.empty();
 
@@ -124,16 +112,6 @@ private:
     auto_aim::ArmorType type = auto_aim::ArmorType::small;  // 大小装甲判定放外层，先按小装甲
     if (armor_valid) {
       points = armors.front().points;
-    }
-
-    // ①.5 装甲数字分类（附加信息）：用装甲四点做透视矫正后分类，只记录编号，
-    // 不参与后面闭环跟随/串口下发，原有云台跟随逻辑完全不变。
-    latest_armor_id_ = -1;
-    if (num_classifier_ && armor_valid && points.size() == 4) {
-      auto num_res = num_classifier_->classify(cv_ptr->image, points);
-      latest_armor_id_ = num_res.id;
-      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 1000,
-        "装甲数字 id=%d (%s, conf=%.2f)", num_res.id, num_res.label.c_str(), num_res.confidence);
     }
 
     // ② IMU 新鲜度判定（超时视为失效）。
@@ -188,7 +166,6 @@ private:
 
   traditional_armor::TraditionalDetector detector_;
   auto_aim::ClosedLoopSolver closed_loop_;
-  std::unique_ptr<NumClassifier> num_classifier_;  // 数字分类器（可选，未配置模型路径时为空）
 
   cv::Mat camera_matrix_;
   cv::Mat distort_coeffs_;
@@ -199,8 +176,6 @@ private:
   bool imu_received_ = false;
   int64_t last_imu_ms_ = 0;
   int imu_timeout_ms_ = 100;
-
-  int latest_armor_id_ = -1;  // 最近一帧装甲数字编号（0~5，-1 表示未识别/未启用）
 
   GimbalCmd latest_cmd_;
 };

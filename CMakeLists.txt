@@ -15,22 +15,6 @@ find_package(Eigen3 REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 
-# ---- ONNX Runtime（数字识别推理） ----
-# ONNXRUNTIME_ROOT 指向 onnxruntime 安装根目录 (包含 include/ 与 lib/)，
-# 例如官方预编译包 onnxruntime-linux-x64-1.23.2/ 解压后的目录。
-set(ONNXRUNTIME_ROOT "/home/sunny/onnxruntime-linux-x64-1.23.2" CACHE PATH
-    "ONNX Runtime 安装根目录 (包含 include/ 与 lib/)")
-find_path(ONNXRUNTIME_INCLUDE_DIR onnxruntime_cxx_api.h
-          HINTS "${ONNXRUNTIME_ROOT}/include" NO_DEFAULT_PATH)
-find_library(ONNXRUNTIME_LIBRARY onnxruntime
-          HINTS "${ONNXRUNTIME_ROOT}/lib" NO_DEFAULT_PATH)
-if(NOT ONNXRUNTIME_INCLUDE_DIR OR NOT ONNXRUNTIME_LIBRARY)
-  message(FATAL_ERROR
-    "未找到 ONNX Runtime 头文件/库，请通过 -DONNXRUNTIME_ROOT=<onnxruntime 根目录> 指定安装位置。")
-endif()
-message(STATUS "ONNX Runtime include: ${ONNXRUNTIME_INCLUDE_DIR}")
-message(STATUS "ONNX Runtime library: ${ONNXRUNTIME_LIBRARY}")
-
 # 自定义消息：云台下发指令
 rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/GimbalCmd.msg"
@@ -51,21 +35,12 @@ target_link_libraries(auto_aim
 add_executable(armor_track_node
   src/auto_aim_node.cpp
   src/traditional_detector.cpp
-  src/num_classifier.cpp
-  Digital-recognition-master/src/DigitalRecognition.cpp
 )
 ament_target_dependencies(armor_track_node rclcpp sensor_msgs cv_bridge)
 target_include_directories(armor_track_node PRIVATE
   include
-  ${ONNXRUNTIME_INCLUDE_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}/Digital-recognition-master/include
 )
-target_link_libraries(armor_track_node auto_aim ${OpenCV_LIBS} yaml-cpp ${ONNXRUNTIME_LIBRARY})
-
-# onnxruntime 动态库目录写入安装 rpath，运行时无需手动设置 LD_LIBRARY_PATH
-get_filename_component(_ort_libdir "${ONNXRUNTIME_LIBRARY}" DIRECTORY)
-set_target_properties(armor_track_node PROPERTIES
-  INSTALL_RPATH "${_ort_libdir}")
+target_link_libraries(armor_track_node auto_aim ${OpenCV_LIBS} yaml-cpp)
 
 # ---- 串口节点（订阅 gimbal_cmd -> 串口下发）----
 add_executable(serial_node
@@ -114,6 +89,6 @@ install(TARGETS armor_track_node serial_node
   DESTINATION lib/${PROJECT_NAME}
 )
 install(DIRECTORY include/ DESTINATION include)
-install(DIRECTORY config launch msg assets DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY config launch msg DESTINATION share/${PROJECT_NAME})
 
 ament_package()
