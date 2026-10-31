@@ -131,20 +131,21 @@ private:
     latest_cmd_.yaw_rate = res.yaw_rate;
     latest_cmd_.pitch_rate = res.pitch_rate;
 
-    // 屏幕左上角叠加显示：EKF 估计的高低差(z)、线速度、视线角速度。
+    // 屏幕左上角叠加显示：PnP 测距 + EKF 估计的高低差(z)、线速度、视线角速度。
     // 注意：OpenCV Hershey 字体不支持中文，故标签用英文。
     if (res.valid) {
       char buf[256];
       std::snprintf(buf, sizeof(buf),
+        "PnP dist   : %6.3f m\n"
         "EKF [x,vx,y,vy,z,vz]\n"
         " height z   : %+6.3f m\n"
         " linear vel : %6.3f m/s\n"
         " LOS rate   : yaw %+6.3f  pitch %+6.3f rad/s",
-        res.ekf_state[4], res.linear_speed, res.yaw_rate, res.pitch_rate);
-      detector_.set_overlay_text(buf);
-    } else {
-      detector_.set_overlay_text("");
+        cv::norm(res.tvec), res.ekf_state[4], res.linear_speed, res.yaw_rate, res.pitch_rate);
+      last_overlay_text_ = buf;
     }
+    // 持续显示：目标短暂丢失时保留上一帧有效数据，避免文字断断续续闪烁。
+    detector_.set_overlay_text(last_overlay_text_);
   }
 
   void timerCallback()
@@ -176,6 +177,8 @@ private:
   bool imu_received_ = false;
   int64_t last_imu_ms_ = 0;
   int imu_timeout_ms_ = 100;
+
+  std::string last_overlay_text_;  // 最近一次有效帧的叠加文本，用于持续显示
 
   GimbalCmd latest_cmd_;
 };

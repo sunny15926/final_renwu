@@ -99,19 +99,21 @@ std::vector<Armor> TraditionalDetector::detect(const cv::Mat & bgr_img)
   if (debug_) {
     cv::Mat viz = bgr_img.clone();
     draw(viz, result);
+    cv::flip(viz, viz, 0);  // 倒置：上下翻转图像内容（灯条/装甲框随图翻转）
+    cv::Mat display;
+    cv::resize(viz, display, cv::Size(), 0.5, 0.5, cv::INTER_AREA);  // 显示放大到 0.5 倍
+    // 叠加数据：绘制在翻转+缩放之后的显示图上，保持正立、固定于左上角。
     if (!overlay_text_.empty()) {
       int base_y = 24;
       const int line_h = 22;
       std::istringstream iss(overlay_text_);
       std::string line;
       while (std::getline(iss, line)) {
-        cv::putText(viz, line, cv::Point(10, base_y),
+        cv::putText(display, line, cv::Point(10, base_y),
                     cv::FONT_HERSHEY_SIMPLEX, 0.55, cv::Scalar(0, 255, 255), 1, cv::LINE_AA);
         base_y += line_h;
       }
     }
-    cv::Mat display;
-    cv::resize(viz, display, cv::Size(), 0.25, 0.25, cv::INTER_AREA);  // 显示缩到 0.25 倍
     cv::imshow("armor", display);
     cv::waitKey(1);
   }

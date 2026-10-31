@@ -1,6 +1,6 @@
 # armor_track_ros2
 
-RoboMaster 风格的 **ROS2（Humble / Ubuntu 22.04）视觉自瞄包**：把「相机取流 → 传统视觉识别装甲板 → PnP 测距 → 闭环云台跟随 → 串口下发云台角度」整条链路串起来，并自带大恒（Galaxy）相机驱动与标定流程。
+RoboMaster 风格的 **ROS2（Humble / Ubuntu 22.04）视觉自瞄包**：把「相机取流 → 传统视觉识别装甲板 → PnP 测距 → 6 维 EKF 跟踪 → 串口下发云台角度」整条链路串起来，并自带大恒（Galaxy）相机驱动与标定流程。
 
 ---
 
@@ -12,8 +12,8 @@ RoboMaster 风格的 **ROS2（Humble / Ubuntu 22.04）视觉自瞄包**：把「
 
 1. **相机驱动 + 标定**：内置大恒 Galaxy 相机驱动 `daheng_camera_node`，发布 `image_raw` + `camera_info`，配合 ROS 的 `cameracalibrator` 完成内参标定，为 PnP 测距提供内参。
 2. **实时装甲板检测**：纯传统视觉（HSV 颜色分割 → 形态学 → 灯条拟合 → 灯条配对 → 装甲四点），不依赖深度学习也能跑，帧率高、对算力要求低。
-3. **目标 3D 定位与测距**：对装甲四点做 `solvePnP`（IPPE）解出相机系下的 3D 位置，再经云台当前 yaw/pitch 反馈构造旋转矩阵换到世界系（Eye-in-Hand 闭环，无手眼外参），得到目标方位。
-4. **运动估计**：6 维扩展卡尔曼滤波（`[x,vx,y,vy,z,vz]`）估计目标线速度与视线角速度，随 `GimbalCmd` 下发并叠加到调试窗口。
+3. **目标 3D 定位与测距**：对装甲四点做 `solvePnP`（IPPE）解出相机系下的 3D 位置，再经相机→云台外参换到云台/世界系，得到距离。
+4. **运动跟踪与预测**：6 维扩展卡尔曼滤波（`[x,vx,y,vy,z,vz]`）估计目标线速度与视线角速度，并做延迟补偿，预测下发时刻的位置。
 5. **云台控制下发**：把解算出的 yaw/pitch/距离/角速度打包成 `GimbalCmd`，再由 `serial_node` 通过串口（`0x55` 帧头 / `0xFF` 帧尾、无 CRC）发给电控执行跟随。
 
 ### 完整链路
@@ -29,15 +29,15 @@ RoboMaster 风格的 **ROS2（Humble / Ubuntu 22.04）视觉自瞄包**：把「
 │  armor_track_node                                                            │
 │   传统装甲识别（HSV→灯条→配对→四点）                                     │
 │        → PnP(solvePnP IPPE) 相机系 3D 位置                                   │
-│        → 云台 yaw/pitch 反馈旋转 → 世界系目标方位                                        │
-│        → atan2 目标角 + 一阶低通 + 限幅                                            │
+│        → 外参变换 相机系→云台系→世界系                                        │
+│        → 6 维 EKF 跟踪 + 延迟补偿                                            │
 │        → 发布 /gimbal_cmd (GimbalCmd)                                        │
 └───────────────────────────────┬─────────────────────────────────────────────┘
                                 │
                                 ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │  serial_node                                                                 │
-│    订阅 /gimbal_cmd → 打包 AimbotFrame(0x55/0xFF) → 串口下发                 │
+│    订阅 /gimbal_cmd → 打包 SendPacket(0x55/0xFF) → 串口下发                 │
 └───────────────────────────────┬─────────────────────────────────────────────┘
                                 │   /dev/ttyACM0 @ 460800 8N1
                                 ▼
@@ -62,32 +62,30 @@ RoboMaster 风格的 **ROS2（Humble / Ubuntu 22.04）视觉自瞄包**：把「
 armor_track_ros2/
 ├── CMakeLists.txt / package.xml
 ├── msg/GimbalCmd.msg                    # 云台下发指令定义
-├── msg/GimbalFeedback.msg                # 云台 IMU 反馈（yaw/pitch）
 ├── config/
-│   ├── auto_aim.yaml                    # 识别 / 装甲尺寸 / 闭环跟踪 / 串口 总配置
+│   ├── auto_aim.yaml                    # 识别 / 外参 / 装甲尺寸 / 跟踪 / 串口 总配置
 │   └── daheng_camera.yaml               # 大恒相机驱动参数（序列号/曝光/内参路径…）
 ├── launch/
 │   ├── armor_track.launch.py            # 自瞄 + 串口
-│   ├── visualize.launch.py              # 相机 + 识别可视化（不含串口）
 │   └── daheng_camera.launch.py          # 大恒相机驱动（跑在 /camera）
 ├── docs/相机标定流程-humble.md           # 标定完整指南
-├── scripts/                             # 调试/诊断脚本（move_gimbal、read_gimbal、preview_camera …）
+├── scripts/                             # 诊断/采集脚本（frame_sweep、telemetry_probe …）
 ├── include/
 │   ├── armor_track_ros2/
 │   │   ├── traditional_detector.hpp     # 传统装甲识别
 │   │   ├── traditional_armor.hpp
 │   │   ├── serial_driver.hpp            # 串口驱动
 │   │   └── daheng_camera.hpp            # 大恒相机封装
-│   ├── auto_aim/
-│   │   ├── closed_loop_solver.hpp        # 闭环解算（PnP + 坐标变换 + 低通 + 限幅）
-│   │   └── ekf.hpp                       # 6 维 EKF
+│   ├── auto_aim/{armor,classifier,solver,target}.hpp
+│   ├── tools/{math_tools,extended_kalman_filter}.hpp
 │   └── sdk/                             # 大恒 Galaxy SDK 头文件（已内置，构建需 libgxiapi.so）
 └── src/
-    ├── auto_aim_node.cpp                # 主节点：识别 → PnP → 闭环解算 → 发布 gimbal_cmd
+    ├── auto_aim_node.cpp                # 主节点：识别 → PnP → EKF → 发布 gimbal_cmd
     ├── traditional_detector.cpp
     ├── serial_node.cpp / serial_driver.cpp
     ├── daheng_camera_node.cpp / daheng_camera.cpp
-    ├── closed_loop_solver.cpp / ekf.cpp
+    ├── auto_aim/{classifier,solver,target}.cpp
+    └── tools/{math_tools,extended_kalman_filter}.cpp
 ```
 
 ---
@@ -168,11 +166,10 @@ solver_.set_camera(msg->k, msg->d) → cv::solvePnP(..., camera_matrix_, distort
 | `enemy_color` | 敌方颜色 `red`/`blue`（只分割该颜色） |
 | `red_hue_low/high` … `value_high` | HSV 阈值（红色跨色相环，用两段取并集） |
 | `max_angle_error` `min/max_lightbar_ratio` … | 灯条筛选与装甲配对参数 |
-| `small/big_armor_width` `lightbar_length` | **装甲板物理尺寸（m）**，必须与实际一致，否则 PnP 测距成比例地错（当前大小装甲判定未接入，恒按小装甲） |
-| `closed_loop_alpha` / `closed_loop_angle_limit` | 一阶低通滤波系数 / 输出角度限幅（rad） |
-| `closed_loop_imu_timeout_ms` / `closed_loop_debug` | IMU 超时判定（ms）/ 闭环调试打印开关 |
-| `ekf_sigma_acc` `ekf_sigma_x/y/z` `ekf_max_dt` | 6 维 EKF 过程/量测噪声与预测步长上限 |
-| `publish_rate` | 下发频率（Hz），0 表示按相机帧率 |
+| `R_camera2gimbal` / `t_camera2gimbal` | **相机→云台外参**（3×3 行主序 + 平移 m），需按实际安装填 |
+| `small/big_armor_width` `lightbar_length` | **PnP 物理尺寸（m）= 灯条围成矩形的尺寸，非装甲外壳尺寸**：宽为左右灯条矩形宽、高为灯条长；四个世界角点对应四根灯条的四个顶点。当前固定步兵小装甲灯条宽 `0.140` / 高 `0.055`。尺寸不符会导致 PnP 测距成比例地错 |
+| `latency_ms` `yaw_offset` `pitch_offset` | 延迟补偿 / 零位补偿 |
+| `max_lost_count` `min_lock_count` | 失锁判定 / 锁定判定帧数 |
 | `serial_port` / `serial_baud` | 串口设备与波特率（默认 `/dev/ttyACM0` @ `460800` 8N1） |
 
 ---
@@ -200,7 +197,7 @@ solver_.set_camera(msg->k, msg->d) → cv::solvePnP(..., camera_matrix_, distort
 | 16 | `q0 q1 q2 q3` | 云台四元数（w x y z，各 4 字节 float） |
 | 1 | `_EOF = 0xFF` | 帧尾 |
 
-> ⚠️ 发送帧 yaw/pitch 为弧度；正 yaw 向右、正 pitch 向上。正负号开关在 `src/serial_node.cpp` 的 `CMD_YAW_SIGN` / `CMD_PITCH_SIGN`（当前 pitch 已取反）。
+> ⚠️ 发送帧 yaw/pitch 为弧度、**不取负**（直接发期望角）；正 yaw 向右、正 pitch 向上。
 > **跟随规则**：`control=true` 时持续下发 = 跟随；`control=false` 时停发 = 不跟随（实现见 `src/serial_node.cpp`）。
 
 ---
@@ -219,8 +216,34 @@ float64 pitch_rate   # 视线角速度 pitch (rad/s)
 
 ---
 
-## 十、待办 / 已知限制
+## 十、调试窗口叠加数据说明
 
-1. ~~串口符号/单位~~：已按电控协议定稿（rad、0x55/0xFF 无 CRC、持续发包=跟随），见 §八。
+当 `config/auto_aim.yaml` 里 `debug: true` 时，会弹出名为 `armor` 的可视化窗口（图像倒置、放大 2 倍），左上角叠加以下实时数据（标签用英文，因 OpenCV Hershey 字体不支持中文）：
+
+```
+PnP dist   : 0.486 m                       # ① PnP 测距
+EKF [x,vx,y,vy,z,vz]                       # ② 标签行：下方数据来自 6 维 EKF
+ height z   : -0.085 m                     # ③ 目标高度（世界系 Z）
+ linear vel : 0.062 m/s                    # ④ 目标线速度模长
+ LOS rate   : yaw 0.066  pitch 0.050 rad/s # ⑤ 视线角速度
+```
+
+| 显示项 | 对应变量 | 含义 |
+|---|---|---|
+| `PnP dist` | `cv::norm(res.tvec)` | solvePnP 解出的相机系平移向量 `tvec` 的欧氏长度，即**相机光心到装甲板中心的直线距离**（传统 PnP 测距的直接结果），单位 m |
+| `EKF [x,vx,y,vy,z,vz]` | — | 标签行：说明下面几项来自 6 维扩展卡尔曼滤波，状态向量为世界系（X 前 / Y 右 / Z 上）下的位置与速度分量 `[x,vx,y,vy,z,vz]` |
+| `height z` | `res.ekf_state[4]` | EKF 估计的目标在世界系 **Z 坐标（高度）**，带符号：`+` 在云台零位上方，`-` 在下方，单位 m |
+| `linear vel` | `res.linear_speed` | 目标**线速度模长** = √(vx²+vy²+vz²)，单位 m/s |
+| `LOS rate yaw / pitch` | `res.yaw_rate` / `res.pitch_rate` | **视线角速度**（Line-of-Sight rate）：目标相对云台的方位角/俯仰角随时间的变化率，yaw 向右为正、pitch 向上为正，单位 rad/s |
+
+> 坐标约定：世界系 **X 前 / Y 右 / Z 上**；相机系 **Z 前 / X 右 / Y 下**（OpenCV）。注意 `PnP dist` 是相机系直线距离，与下发消息 `GimbalCmd.distance`（世界系 `xyz_in_world` 的模长）略有差异。
+>
+> 目标短暂丢失时，叠加数据会保留上一帧有效值（持续显示、不闪烁），恢复锁定后自动刷新。
+
+---
+
+## 十一、待办 / 已知限制
+
+1. ~~串口符号/单位~~：已按电控协议定稿（rad、不取负、正 yaw 向右 / 正 pitch 向上、持续发包=跟随），见 §八。
 2. **相机标定**：当前 `camera_info_url` 指向 `/home/sunny/camera_calib/calibration.yaml`，内参为**占位估算值**（K≈[1574.77, 962.50; 1574.32, 596.60]，D=[-0.242, 0.157, -0.0001, 0.0009, 0]），上线前跑 `cameracalibrator` 正式标定并覆盖该 yaml（见 §七 相机内参）。
-3. **装甲尺寸与标定**：装甲板尺寸务必按实物填（否则 PnP 测距成比例地错）；当前闭环用云台 yaw/pitch 反馈（Eye-in-Hand）做坐标变换，无手眼外参，大小装甲判定未接入（恒按小装甲）。
+3. **外参与尺寸**：`R_camera2gimbal`/`t_camera2gimbal` 和装甲板尺寸务必按实物标定，否则测距与角度偏。

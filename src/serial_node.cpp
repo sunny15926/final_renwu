@@ -60,13 +60,13 @@ public:
   : Node("serial_node")
   {
     auto yaml = YAML::LoadFile(config_path);
-    std::string port = yaml["serial_port"].as<std::string>("/dev/ttyACM0");
-    int baud = yaml["serial_baud"].as<int>(460800);
+    port_ = yaml["serial_port"].as<std::string>("/dev/ttyACM0");
+    baud_ = yaml["serial_baud"].as<int>(460800);
 
-    if (!driver_.open(port, baud)) {
-      RCLCPP_ERROR(get_logger(), "无法打开串口 %s @ %d，将不断重试", port.c_str(), baud);
+    if (!driver_.open(port_, baud_)) {
+      RCLCPP_ERROR(get_logger(), "无法打开串口 %s @ %d，将每秒重试", port_.c_str(), baud_);
     } else {
-      RCLCPP_INFO(get_logger(), "串口已打开 %s @ %d (8N1)", port.c_str(), baud);
+      RCLCPP_INFO(get_logger(), "串口已打开 %s @ %d (8N1)", port_.c_str(), baud_);
     }
 
     cmd_sub_ = create_subscription<armor_track_ros2::msg::GimbalCmd>(
@@ -143,7 +143,13 @@ private:
 
   void checkTimer()
   {
-    if (!driver_.isOpen()) return;
+    if (!driver_.isOpen()) {
+      // 断连/未连时每秒重试打开，设备插拔后可自动恢复。
+      if (driver_.open(port_, baud_)) {
+        RCLCPP_INFO(get_logger(), "串口已重新打开 %s @ %d (8N1)", port_.c_str(), baud_);
+      }
+      return;
+    }
     if (nowMs() - last_rx_ms_ > 2000) {
       RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "2s 未收到电控数据，检查串口连接");
     }
@@ -159,6 +165,9 @@ private:
   rclcpp::Subscription<armor_track_ros2::msg::GimbalCmd>::SharedPtr cmd_sub_;
   rclcpp::Publisher<armor_track_ros2::msg::GimbalFeedback>::SharedPtr feedback_pub_;
   rclcpp::TimerBase::SharedPtr check_timer_;
+
+  std::string port_;
+  int baud_ = 460800;
 
   std::thread reader_;
   std::vector<uint8_t> rx_buf_;

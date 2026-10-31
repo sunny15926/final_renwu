@@ -58,6 +58,7 @@ private:
   void setError(const std::string & what);
 
   GX_DEV_HANDLE device_ = nullptr;         // 设备句柄
+  GX_DS_HANDLE stream_handle_ = nullptr;   // 数据流句柄
   int width_ = 0;
   int height_ = 0;
   int64_t color_filter_ = GX_COLOR_FILTER_NONE;  // Bayer 排列（RG/GB/GR/BG）

@@ -35,10 +35,12 @@ max_rectangular_error: 25  # degree，灯条与连线垂直误差
 # 是否显示调试窗口（HSV 二值图 + 装甲框/EKF 叠加可视化；无显示环境务必 false，否则 cv::imshow 报错）
 debug: true
 
-#####----- 装甲板物理尺寸（⚠️ 必须与实际板一致，否则 PnP 测距不准） -----#####
-small_armor_width: 0.135   # 小装甲板宽（m）
-big_armor_width:   0.230   # 大装甲板宽（m）
-lightbar_length:   0.056   # 灯条长（m，即装甲板高度方向）
+#####----- PnP 物理尺寸（⚠️ 是灯条围成矩形的尺寸，非装甲外壳尺寸） -----#####
+# 四个世界角点对应四根灯条的四个顶点（左上/右上/右下/左下）。
+# 宽 = 左右灯条矩形宽，高 = 灯条长（矩形高方向）。当前固定步兵小装甲灯条：宽 0.140 / 高 0.055。
+small_armor_width: 0.140   # 小装甲灯条矩形宽（m）
+big_armor_width:   0.230   # 大装甲灯条矩形宽（m）
+lightbar_length:   0.055   # 灯条长（m，矩形高方向）
 
 #####----- 闭环自瞄（closed_loop_solver） -----#####
 # Eye-in-Hand：用云台 IMU 回传的 yaw/pitch 构造旋转矩阵做闭环，不做手眼标定。

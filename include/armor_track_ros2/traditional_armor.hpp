@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <string>
 #include <vector>
 
 namespace traditional_armor
@@ -24,11 +25,13 @@ struct Lightbar
   Color color;                 // 灯条颜色（= 敌方颜色）
   cv::Point2f center;          // 灯条中心（RotatedRect 中心）
   cv::Point2f top, bottom;     // 灯条上下两端的中点
+  cv::Point2f top2bottom;      // 从 top 指向 bottom 的向量
   double angle;                // 灯条朝向角：top2bottom 与 x 轴夹角（rad）
   double angle_error;          // 灯条偏离竖直方向的角度 |angle - π/2|（rad）
   double length;               // 灯条长度（像素）
   double width;                // 灯条宽度（像素）
   double ratio;                // 灯条长宽比 = length / width
+  cv::RotatedRect rotated_rect;  // 灯条最小外接旋转矩形
 
   Lightbar() = default;
   Lightbar(const cv::RotatedRect & rotated_rect, std::size_t id);
@@ -51,7 +54,7 @@ struct Armor
 
 // 灯条构造：由最小外接旋转矩形计算几何属性
 inline Lightbar::Lightbar(const cv::RotatedRect & rotated_rect, std::size_t id)
-: id(id)
+: id(id), rotated_rect(rotated_rect)
 {
   // 取出旋转矩形的四个角点
   std::vector<cv::Point2f> corners(4);
@@ -66,7 +69,7 @@ inline Lightbar::Lightbar(const cv::RotatedRect & rotated_rect, std::size_t id)
   // 上端中点 = 上边两点的中点；下端中点 = 下边两点的中点
   top = (corners[0] + corners[1]) / 2;
   bottom = (corners[2] + corners[3]) / 2;
-  cv::Point2f top2bottom = bottom - top;
+  top2bottom = bottom - top;
 
   width = cv::norm(corners[0] - corners[1]);  // 上边长度即灯条宽度
   angle = std::atan2(top2bottom.y, top2bottom.x);
