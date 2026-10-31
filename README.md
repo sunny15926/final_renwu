@@ -12,7 +12,7 @@ RoboMaster 风格的 **ROS2（Humble / Ubuntu 22.04）视觉自瞄包**：把「
 
 1. **相机驱动 + 标定**：内置大恒 Galaxy 相机驱动 `daheng_camera_node`，发布 `image_raw` + `camera_info`，配合 ROS 的 `cameracalibrator` 完成内参标定，为 PnP 测距提供内参。
 2. **实时装甲板检测**：纯传统视觉（HSV 颜色分割 → 形态学 → 灯条拟合 → 灯条配对 → 装甲四点），不依赖深度学习也能跑，帧率高、对算力要求低。
-3. **目标 3D 定位与测距**：对装甲四点做 `solvePnP`（IPPE）解出相机系下的 3D 位置，再经相机→云台外参换到云台/世界系，得到距离。
+3. **目标 3D 定位与测距**：对装甲四点做 `solvePnP`（IPPE）解出相机系下的 3D 位置，再用固定轴排列矩阵 `R0` + 云台 IMU 回传的 yaw/pitch 构造闭环旋转矩阵，换到世界系得到距离。
 4. **运动跟踪与预测**：6 维扩展卡尔曼滤波（`[x,vx,y,vy,z,vz]`）估计目标线速度与视线角速度，并做延迟补偿，预测下发时刻的位置。
 5. **云台控制下发**：把解算出的 yaw/pitch/距离/角速度打包成 `GimbalCmd`，再由 `serial_node` 通过串口（`0x55` 帧头 / `0xFF` 帧尾、无 CRC）发给电控执行跟随。
 
@@ -29,7 +29,7 @@ RoboMaster 风格的 **ROS2（Humble / Ubuntu 22.04）视觉自瞄包**：把「
 │  armor_track_node                                                            │
 │   传统装甲识别（HSV→灯条→配对→四点）                                     │
 │        → PnP(solvePnP IPPE) 相机系 3D 位置                                   │
-│        → 外参变换 相机系→云台系→世界系                                        │
+│        → 闭环变换（R0 + 云台 yaw/pitch）相机系→世界系                          │
 │        → 6 维 EKF 跟踪 + 延迟补偿                                            │
 │        → 发布 /gimbal_cmd (GimbalCmd)                                        │
 └───────────────────────────────┬─────────────────────────────────────────────┘
@@ -164,13 +164,18 @@ solver_.set_camera(msg->k, msg->d) → cv::solvePnP(..., camera_matrix_, distort
 | 参数 | 说明 |
 |---|---|
 | `enemy_color` | 敌方颜色 `red`/`blue`（只分割该颜色） |
-| `red_hue_low/high` … `value_high` | HSV 阈值（红色跨色相环，用两段取并集） |
-| `max_angle_error` `min/max_lightbar_ratio` … | 灯条筛选与装甲配对参数 |
-| `R_camera2gimbal` / `t_camera2gimbal` | **相机→云台外参**（3×3 行主序 + 平移 m），需按实际安装填 |
+| `red_hue_low/high` `blue_hue_low/high` `saturation_*` `value_*` | HSV 阈值（红色跨色相环 0°/180°，用两段取并集） |
+| `morph_kernel_size` | 形态学闭运算核大小 |
+| `max_angle_error` `min/max_lightbar_ratio` `min_lightbar_length` `min/max_armor_ratio` `max_side_ratio` `max_rectangular_error` | 灯条筛选与装甲配对参数 |
 | `small/big_armor_width` `lightbar_length` | **PnP 物理尺寸（m）= 灯条围成矩形的尺寸，非装甲外壳尺寸**：宽为左右灯条矩形宽、高为灯条长；四个世界角点对应四根灯条的四个顶点。当前固定步兵小装甲灯条宽 `0.140` / 高 `0.055`。尺寸不符会导致 PnP 测距成比例地错 |
-| `latency_ms` `yaw_offset` `pitch_offset` | 延迟补偿 / 零位补偿 |
-| `max_lost_count` `min_lock_count` | 失锁判定 / 锁定判定帧数 |
+| `closed_loop_alpha` | 一阶低通滤波系数 `(0,1]`，越小越平滑 |
+| `yaw_limit` / `pitch_limit` | **云台角度输出限幅（rad，独立）**：yaw `1.57`=±90°、pitch `0.35`=±20°。限幅只作用于输出，滤波内部存未限幅值避免饱和 |
+| `closed_loop_imu_timeout_ms` | IMU 超时判定失效（ms），超时角度置 0 停止跟随 |
+| `ekf_sigma_acc` `ekf_sigma_x/y/z` `ekf_max_dt` | 6 维 EKF 过程/量测噪声与预测步长上限 |
+| `publish_rate` | 下发频率（Hz），0 表示按相机帧率 |
 | `serial_port` / `serial_baud` | 串口设备与波特率（默认 `/dev/ttyACM0` @ `460800` 8N1） |
+
+> ⚠️ **无固定外参**：当前实现不做 `R_camera2gimbal`/`t_camera2gimbal` 手眼标定，而是用固定的相机→世界轴排列矩阵 `R0` 加云台 IMU 回传的 yaw/pitch 构造闭环旋转矩阵（Eye-in-Hand），见 `src/closed_loop_solver.cpp` 的 `R_C2W = R_z(+yaw)*R_y(-pitch)*R0`。
 
 ---
 
@@ -246,4 +251,4 @@ EKF [x,vx,y,vy,z,vz]                       # ② 标签行：下方数据来自 
 
 1. ~~串口符号/单位~~：已按电控协议定稿（rad、不取负、正 yaw 向右 / 正 pitch 向上、持续发包=跟随），见 §八。
 2. **相机标定**：当前 `camera_info_url` 指向 `/home/sunny/camera_calib/calibration.yaml`，内参为**占位估算值**（K≈[1574.77, 962.50; 1574.32, 596.60]，D=[-0.242, 0.157, -0.0001, 0.0009, 0]），上线前跑 `cameracalibrator` 正式标定并覆盖该 yaml（见 §七 相机内参）。
-3. **外参与尺寸**：`R_camera2gimbal`/`t_camera2gimbal` 和装甲板尺寸务必按实物标定，否则测距与角度偏。
+3. **装甲尺寸**：`small/big_armor_width`、`lightbar_length` 务必按实物（灯条矩形）标定，否则测距与角度偏；闭环外参用固定 `R0` + 云台 IMU 回传实现，无需手眼标定。

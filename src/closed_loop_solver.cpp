@@ -26,7 +26,8 @@ ClosedLoopSolver::ClosedLoopSolver(const std::string & config_path)
   lightbar_length_ = yaml["lightbar_length"].as<double>();
 
   alpha_ = yaml["closed_loop_alpha"].as<double>(0.3);
-  angle_limit_ = yaml["closed_loop_angle_limit"].as<double>(0.3);
+  yaw_limit_ = yaml["yaw_limit"].as<double>(1.57);
+  pitch_limit_ = yaml["pitch_limit"].as<double>(0.35);
   debug_ = yaml["closed_loop_debug"].as<bool>(false);
 
   // EKF 参数（6 维 [x,vx,y,vy,z,vz]）：过程噪声与量测噪声，越小越平滑。
@@ -89,11 +90,11 @@ ClosedLoopSolver::Result ClosedLoopSolver::aim(
         1.0, 0.0, 0.0,
         0.0, -1.0, 0.0;
 
-  //    R_C2W = R_z(-yaw) * R_y(+pitch) * R0。
-  //    注意：IMU 四元数给出的是 world->camera 姿态，其 Z-Y-X 欧拉角 yaw/pitch 与
-  //    云台命令角（yaw 右正 / pitch 上正）互为相反数，故这里取反后再构造 camera->world。
-  double cy = std::cos(-gimbal_yaw), sy = std::sin(-gimbal_yaw);
-  double cp = std::cos(gimbal_pitch), sp = std::sin(gimbal_pitch);
+  //    R_C2W = R_z(+yaw) * R_y(-pitch) * R0。
+  //    gimbal_yaw / gimbal_pitch 是云台在世界的当前姿态角（yaw 右正 / pitch 上正），
+  //    相机随云台转动，故用 +yaw / -pitch 把相机系转到世界系（与头文件公式一致）。
+  double cy = std::cos(gimbal_yaw), sy = std::sin(gimbal_yaw);
+  double cp = std::cos(-gimbal_pitch), sp = std::sin(-gimbal_pitch);
   Eigen::Matrix3d Rz;
   Rz << cy, -sy, 0.0,
         sy,  cy, 0.0,
@@ -158,8 +159,8 @@ ClosedLoopSolver::Result ClosedLoopSolver::aim(
   }
 
   // ⑥ 限幅。
-  r.yaw = clamp(yaw_filt_, -angle_limit_, angle_limit_);
-  r.pitch = clamp(pitch_filt_, -angle_limit_, angle_limit_);
+  r.yaw = clamp(yaw_filt_, -yaw_limit_, yaw_limit_);
+  r.pitch = clamp(pitch_filt_, -pitch_limit_, pitch_limit_);
 
   r.valid = true;
   r.control = true;

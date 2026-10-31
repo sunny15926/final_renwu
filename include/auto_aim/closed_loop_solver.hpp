@@ -67,7 +67,8 @@ private:
   double lightbar_length_;
 
   double alpha_;        // 一阶低通滤波系数 (0,1]，越小越平滑
-  double angle_limit_;  // 输出角度限幅（rad）
+  double yaw_limit_;    // yaw 输出限幅（rad）
+  double pitch_limit_;  // pitch 输出限幅（rad）
 
   bool filter_initialized_ = false;
   double yaw_filt_ = 0.0;

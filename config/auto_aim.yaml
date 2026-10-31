@@ -45,7 +45,8 @@ lightbar_length:   0.055   # 灯条长（m，矩形高方向）
 #####----- 闭环自瞄（closed_loop_solver） -----#####
 # Eye-in-Hand：用云台 IMU 回传的 yaw/pitch 构造旋转矩阵做闭环，不做手眼标定。
 closed_loop_alpha: 0.3            # 一阶低通滤波系数 (0,1]，越小越平滑
-closed_loop_angle_limit: 0.3      # 输出角度限幅（rad）
+yaw_limit: 1.57                    # yaw 输出限幅（rad，±90°）
+pitch_limit: 0.35                  # pitch 输出限幅（rad，±20°）
 closed_loop_imu_timeout_ms: 100   # IMU 超时判定失效（ms），超时角度置 0 停止跟随
 closed_loop_debug: true           # 打印 tvec/云台姿态/世界坐标/滤波前后角度
 
